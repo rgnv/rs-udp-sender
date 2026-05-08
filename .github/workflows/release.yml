@@ -330,10 +330,59 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ── Homebrew ───────────────────────────────────────────────────────
+  homebrew:
+    name: Update Homebrew Formula
+    runs-on: ubuntu-latest
+    needs: [test, release]
+    steps:
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: rgnv/homebrew-rs-udp-sender
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download release artifacts and compute SHA256
+        run: |
+          V="${{ needs.test.outputs.version }}"
+          BASE="https://github.com/rgnv/rs-udp-sender/releases/download/${V}"
+
+          DL() { curl -sSfL "${BASE}/rs-udp-sender-${V}-$1-x64.tar.gz" -o "/tmp/$1-amd64.tar.gz"; }
+          SHA() { sha256sum "/tmp/$1-amd64.tar.gz" | awk '{print $1}'; }
+
+          DL linux; DL darwin
+
+          if [ "$(uname -m)" != "arm64" ] && [ "$(uname -m)" != "aarch64" ]; then
+            DL2() { curl -sSfL "${BASE}/rs-udp-sender-${V}-$1-arm64.tar.gz" -o "/tmp/$1-arm64.tar.gz"; }
+            SHA2() { sha256sum "/tmp/$1-arm64.tar.gz" | awk '{print $1}'; }
+            DL2 linux; DL2 darwin
+            SHA_LINUX_ARM64=$(SHA2 linux)
+            SHA_DARWIN_ARM64=$(SHA2 darwin)
+          fi
+
+          SHA_LINUX_AMD64=$(SHA linux)
+          SHA_DARWIN_AMD64=$(SHA darwin)
+
+          sed -i "s/{{VERSION}}/${V}/" Formula/rs-udp-sender.rb
+          sed -i "s/{{SHA256_DARWIN_AMD64}}/${SHA_DARWIN_AMD64}/" Formula/rs-udp-sender.rb
+          sed -i "s/{{SHA256_DARWIN_ARM64}}/${SHA_DARWIN_ARM64:-${SHA_DARWIN_AMD64}}/" Formula/rs-udp-sender.rb
+          sed -i "s/{{SHA256_LINUX_AMD64}}/${SHA_LINUX_AMD64}/" Formula/rs-udp-sender.rb
+          sed -i "s/{{SHA256_LINUX_ARM64}}/${SHA_LINUX_ARM64:-${SHA_LINUX_AMD64}}/" Formula/rs-udp-sender.rb
+
+          echo "Homebrew formula updated for version ${V}"
+
+      - name: Push formula update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/rs-udp-sender.rb
+          git commit -m "Update formula for ${{ needs.test.outputs.version }}" || true
+          git push origin master
+
   # ── Summary ────────────────────────────────────────────────────────
   summary:
     name: Release Summary
-    needs: [test, release]
+    needs: [test, release, homebrew]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -360,4 +409,8 @@ jobs:
             echo ""
             echo "### Release URL"
             echo "https://github.com/${{ github.repository }}/releases/tag/${V}"
+            echo ""
+            echo "### Homebrew"
+            echo "- ✅ Formula updated in rgnv/homebrew-rs-udp-sender"
+            echo '- `brew tap rgnv/rs-udp-sender && brew install rs-udp-sender`'
           } >> "$GITHUB_STEP_SUMMARY"
