@@ -2,7 +2,7 @@
 
 Rust workspace for high-throughput UDP packet generation and raw-socket sending with per-packet source/destination control.
 
-This project is the Rust equivalent of the Go `udp-sender` project and keeps the same wire protocol, feature set, and operational model.
+This project is the Rust equivalent of [Cribl's Go `udp-sender`](https://github.com/criblio/udp-sender) and keeps the same wire protocol, feature set, and operational model.
 
 ## Features
 
