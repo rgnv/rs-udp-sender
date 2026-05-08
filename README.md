@@ -45,9 +45,9 @@ cargo install --path crates/snmp-trap-generator --bin rs-udp-snmp-trap-generator
 Or install from git (example):
 
 ```bash
-cargo install --git https://github.com/criblio/rs-udp-sender --bin rs-udp-sender
-cargo install --git https://github.com/criblio/rs-udp-sender --bin rs-udp-packet-generator
-cargo install --git https://github.com/criblio/rs-udp-sender --bin rs-udp-snmp-trap-generator
+cargo install --git https://github.com/rgnv/rs-udp-sender --bin rs-udp-sender
+cargo install --git https://github.com/rgnv/rs-udp-sender --bin rs-udp-packet-generator
+cargo install --git https://github.com/rgnv/rs-udp-sender --bin rs-udp-snmp-trap-generator
 ```
 
 ### Make install
