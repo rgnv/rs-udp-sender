@@ -54,7 +54,10 @@ pub enum ProtocolError {
     ReadMagic { read: usize, source: io::Error },
 
     #[error("reading {field}: {source}")]
-    ReadField { field: &'static str, source: io::Error },
+    ReadField {
+        field: &'static str,
+        source: io::Error,
+    },
 
     #[error("reading payload ({payload_len} bytes): {source}")]
     ReadPayload {
@@ -124,7 +127,10 @@ impl<'a, R: Read> ProtocolStream<'a, R> {
 
                     return Err(ProtocolError::ReadMagic {
                         read,
-                        source: io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"),
+                        source: io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "failed to fill whole buffer",
+                        ),
                     });
                 }
                 Ok(n) => {
@@ -142,7 +148,11 @@ impl<'a, R: Read> ProtocolStream<'a, R> {
         Ok(MagicRead::Complete(magic))
     }
 
-    fn read_exact_field(&mut self, buf: &mut [u8], field: &'static str) -> Result<(), ProtocolError> {
+    fn read_exact_field(
+        &mut self,
+        buf: &mut [u8],
+        field: &'static str,
+    ) -> Result<(), ProtocolError> {
         self.reader
             .read_exact(buf)
             .map_err(|source| ProtocolError::ReadField { field, source })
@@ -248,13 +258,13 @@ impl<'a, R: Read> Iterator for ProtocolStream<'a, R> {
         };
 
         let mut payload = vec![0u8; payload_len];
-        if payload_len > 0 {
-            if let Err(source) = self.reader.read_exact(&mut payload) {
-                return self.fail_once(ProtocolError::ReadPayload {
-                    payload_len,
-                    source,
-                });
-            }
+        if payload_len > 0
+            && let Err(source) = self.reader.read_exact(&mut payload)
+        {
+            return self.fail_once(ProtocolError::ReadPayload {
+                payload_len,
+                source,
+            });
         }
 
         let ip_header_size = if is_ipv6 {
@@ -268,8 +278,6 @@ impl<'a, R: Read> Iterator for ProtocolStream<'a, R> {
             let payload_size = payload.len();
             let source_ip = src_ip;
             let source_port = src_port;
-            let dest_ip = dest_ip;
-            let dest_port = dest_port;
             let err_text = format!(
                 "packet size {} exceeds MTU limit of {} bytes",
                 packet_size, self.mtu
@@ -381,7 +389,10 @@ mod tests {
         let logger = test_logger();
         let mut stream = ProtocolStream::new(Cursor::new(data), true, 1500, &logger);
 
-        let packet = stream.next().expect("expected one packet").expect("expected valid packet");
+        let packet = stream
+            .next()
+            .expect("expected one packet")
+            .expect("expected valid packet");
         assert_eq!(packet.src_ip, src_ip);
         assert_eq!(packet.dest_ip, dest_ip);
         assert_eq!(packet.src_port, 12345);
@@ -402,7 +413,10 @@ mod tests {
         let logger = test_logger();
         let mut stream = ProtocolStream::new(Cursor::new(data), true, 1500, &logger);
 
-        let packet = stream.next().expect("expected one packet").expect("expected valid packet");
+        let packet = stream
+            .next()
+            .expect("expected one packet")
+            .expect("expected valid packet");
         assert_eq!(packet.src_ip, src_ip);
         assert_eq!(packet.dest_ip, dest_ip);
         assert_eq!(packet.src_port, 54321);
@@ -487,7 +501,10 @@ mod tests {
                 exp2,
             })) => {
                 assert_eq!((got0, got1, got2), (0xDE, 0xAD, 0xBE));
-                assert_eq!((exp0, exp1, exp2), (MAGIC_BYTES[0], MAGIC_BYTES[1], MAGIC_BYTES[2]));
+                assert_eq!(
+                    (exp0, exp1, exp2),
+                    (MAGIC_BYTES[0], MAGIC_BYTES[1], MAGIC_BYTES[2])
+                );
             }
             other => panic!("expected InvalidMagic error, got {other:?}"),
         }
@@ -568,7 +585,10 @@ mod tests {
             other => panic!("expected MTUExceeded error, got {other:?}"),
         }
 
-        let ok_packet = stream.next().expect("expected second packet").expect("expected valid second packet");
+        let ok_packet = stream
+            .next()
+            .expect("expected second packet")
+            .expect("expected valid second packet");
         assert_eq!(ok_packet.payload, b"ok");
         assert_eq!(ok_packet.src_port, 12346);
         assert_eq!(ok_packet.dest_port, 54322);
@@ -590,7 +610,10 @@ mod tests {
         let logger = test_logger();
         let mut stream = ProtocolStream::new(Cursor::new(data), true, 1500, &logger);
 
-        let packet = stream.next().expect("expected one packet").expect("expected valid packet");
+        let packet = stream
+            .next()
+            .expect("expected one packet")
+            .expect("expected valid packet");
         assert!(packet.payload.is_empty());
         assert!(stream.next().is_none());
     }
@@ -612,7 +635,10 @@ mod tests {
         let logger = test_logger();
         let mut stream = ProtocolStream::new(Cursor::new(data), true, mtu, &logger);
 
-        let packet = stream.next().expect("expected packet").expect("packet should be accepted at MTU limit");
+        let packet = stream
+            .next()
+            .expect("expected packet")
+            .expect("packet should be accepted at MTU limit");
         assert_eq!(packet.payload, payload);
         assert!(stream.next().is_none());
     }
@@ -632,7 +658,10 @@ mod tests {
         let logger = test_logger();
         let mut stream = ProtocolStream::new(Cursor::new(data), true, 1500, &logger);
 
-        let packet = stream.next().expect("expected packet").expect("expected valid packet");
+        let packet = stream
+            .next()
+            .expect("expected packet")
+            .expect("expected valid packet");
         assert_eq!(packet.payload, payload);
         assert!(stream.next().is_none());
     }
@@ -652,7 +681,10 @@ mod tests {
         let logger = test_logger();
         let mut stream = ProtocolStream::new(Cursor::new(data), true, 1500, &logger);
 
-        let packet = stream.next().expect("expected packet").expect("expected valid packet");
+        let packet = stream
+            .next()
+            .expect("expected packet")
+            .expect("expected valid packet");
         assert_eq!(packet.flags, flags);
         assert!(matches!(packet.src_ip, IpAddr::V6(_)));
         assert!(matches!(packet.dest_ip, IpAddr::V6(_)));
@@ -668,7 +700,12 @@ mod tests {
     #[test]
     fn returns_read_magic_error_on_incomplete_magic_bytes() {
         let logger = test_logger();
-        let mut stream = ProtocolStream::new(Cursor::new(vec![MAGIC_BYTES[0], MAGIC_BYTES[1]]), true, 1500, &logger);
+        let mut stream = ProtocolStream::new(
+            Cursor::new(vec![MAGIC_BYTES[0], MAGIC_BYTES[1]]),
+            true,
+            1500,
+            &logger,
+        );
 
         match stream.next() {
             Some(Err(ProtocolError::ReadMagic { read, source })) => {
@@ -682,7 +719,8 @@ mod tests {
     #[test]
     fn returns_read_field_error_on_missing_flags() {
         let logger = test_logger();
-        let mut stream = ProtocolStream::new(Cursor::new(MAGIC_BYTES.to_vec()), true, 1500, &logger);
+        let mut stream =
+            ProtocolStream::new(Cursor::new(MAGIC_BYTES.to_vec()), true, 1500, &logger);
 
         match stream.next() {
             Some(Err(ProtocolError::ReadField { field, source })) => {
@@ -709,7 +747,10 @@ mod tests {
         let mut stream = ProtocolStream::new(Cursor::new(data), true, 1500, &logger);
 
         match stream.next() {
-            Some(Err(ProtocolError::ReadPayload { payload_len, source })) => {
+            Some(Err(ProtocolError::ReadPayload {
+                payload_len,
+                source,
+            })) => {
                 assert_eq!(payload_len, 100);
                 assert_eq!(source.kind(), io::ErrorKind::UnexpectedEof);
             }

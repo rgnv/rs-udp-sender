@@ -13,12 +13,7 @@ impl Logger {
         Self { min_level }
     }
 
-    pub fn log(
-        &self,
-        level: LogLevel,
-        message: &str,
-        fields: &[(&str, &str)],
-    ) {
+    pub fn log(&self, level: LogLevel, message: &str, fields: &[(&str, &str)]) {
         if level < self.min_level {
             return;
         }

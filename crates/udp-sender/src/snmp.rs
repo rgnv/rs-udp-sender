@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rasn::ber;
 use rasn::types::ObjectIdentifier;
 use rasn_smi::v1::ToOpaque;
-use rasn_snmp::{v1, v2, v2c, v3};
 use rasn_snmp::v3::SecurityParameters;
+use rasn_snmp::{v1, v2, v2c, v3};
 use thiserror::Error;
 
 use crate::constants::{DEFAULT_SNMP_ENGINE_ID, SNMP_SYS_UP_TIME_OID};
@@ -194,13 +194,15 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
     if config.username.trim().is_empty() {
         return Err(SnmpError::MissingField("username".to_string()));
     }
-    if config.auth_protocol == AuthProtocol::NoAuth && config.priv_protocol != PrivProtocol::NoPriv {
+    if config.auth_protocol == AuthProtocol::NoAuth && config.priv_protocol != PrivProtocol::NoPriv
+    {
         return Err(SnmpError::InvalidConfig(
             "privacy requires authentication".to_string(),
         ));
     }
 
-    if config.auth_protocol != AuthProtocol::NoAuth || config.priv_protocol != PrivProtocol::NoPriv {
+    if config.auth_protocol != AuthProtocol::NoAuth || config.priv_protocol != PrivProtocol::NoPriv
+    {
         return Err(SnmpError::KeyInitFailed(
             "v3 key derivation not yet fully implemented — requires manual AES/DES key gen"
                 .to_string(),
@@ -271,9 +273,7 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
 
     message
         .encode_security_parameters(rasn::Codec::Ber, &security)
-        .map_err(|e| {
-            SnmpError::EncodingError(Box::new(std::io::Error::other(e.to_string())))
-        })?;
+        .map_err(|e| SnmpError::EncodingError(Box::new(std::io::Error::other(e.to_string()))))?;
 
     ber::encode(&message).map_err(|e| SnmpError::EncodingError(Box::new(e)))
 }
@@ -295,8 +295,7 @@ fn parse_oid(oid: &str) -> Result<ObjectIdentifier, SnmpError> {
         arcs.push(arc);
     }
 
-    ObjectIdentifier::new(arcs)
-        .ok_or_else(|| SnmpError::InvalidOid(oid.to_string()))
+    ObjectIdentifier::new(arcs).ok_or_else(|| SnmpError::InvalidOid(oid.to_string()))
 }
 
 fn v1_varbind_from_config(varbind: SNMPVarbind) -> Result<v1::VarBind, SnmpError> {
@@ -347,11 +346,9 @@ fn v2_varbind_from_config(varbind: SNMPVarbind) -> Result<v2::VarBind, SnmpError
         (SNMPType::Integer, SNMPValue::Int(v)) => {
             v2::VarBindValue::Value(rasn_smi::v2::ObjectSyntax::from(v))
         }
-        (SNMPType::OctetString, SNMPValue::Str(v)) => {
-            v2::VarBindValue::Value(rasn_smi::v2::ObjectSyntax::from(
-                rasn::types::OctetString::from(v.into_bytes()),
-            ))
-        }
+        (SNMPType::OctetString, SNMPValue::Str(v)) => v2::VarBindValue::Value(
+            rasn_smi::v2::ObjectSyntax::from(rasn::types::OctetString::from(v.into_bytes())),
+        ),
         (SNMPType::ObjectIdentifier, SNMPValue::Oid(v)) => {
             v2::VarBindValue::Value(rasn_smi::v2::ObjectSyntax::from(parse_oid(&v)?))
         }
@@ -361,9 +358,9 @@ fn v2_varbind_from_config(varbind: SNMPVarbind) -> Result<v2::VarBind, SnmpError
         (SNMPType::IpAddress, SNMPValue::Ip(v)) => v2::VarBindValue::Value(
             rasn_smi::v2::ObjectSyntax::from(rasn_smi::v1::IpAddress(v.octets().into())),
         ),
-        (SNMPType::Counter32, SNMPValue::Uint(v)) => v2::VarBindValue::Value(
-            rasn_smi::v2::ObjectSyntax::from(rasn_smi::v1::Counter(v)),
-        ),
+        (SNMPType::Counter32, SNMPValue::Uint(v)) => {
+            v2::VarBindValue::Value(rasn_smi::v2::ObjectSyntax::from(rasn_smi::v1::Counter(v)))
+        }
         (SNMPType::Gauge32, SNMPValue::Uint(v)) => {
             v2::VarBindValue::Value(rasn_smi::v2::ObjectSyntax::from(rasn_smi::v1::Gauge(v)))
         }

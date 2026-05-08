@@ -42,7 +42,7 @@ jobs:
         uses: swatinem/rust-cache@v2
 
       - name: Run ignored integration tests with sudo
-        run: sudo -E cargo test --workspace -- --ignored
+        run: sudo -E "$(which cargo)" test --workspace -- --ignored
 
   build:
     name: Build

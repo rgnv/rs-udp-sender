@@ -146,7 +146,10 @@ fn generate_ipv6(cli: &Cli) -> Result<(), String> {
     let base_v6 = match base_ip {
         IpAddr::V6(v6) => v6,
         IpAddr::V4(_) => {
-            return Err(format!("IPv6 flag set but base IP is IPv4: {}", cli.base_ip));
+            return Err(format!(
+                "IPv6 flag set but base IP is IPv4: {}",
+                cli.base_ip
+            ));
         }
     };
 

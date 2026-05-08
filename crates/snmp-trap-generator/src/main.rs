@@ -6,9 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use udp_sender::constants::{FLAG_IPV6, MAGIC_BYTES, SNMP_SYS_DESCR_OID, SNMP_SYS_NAME_OID};
 use udp_sender::snmp::{
-    build_snmpv1_trap_pdu, build_snmpv2c_trap_pdu, build_snmpv3_trap_pdu, AuthProtocol,
-    PrivProtocol, SNMPType, SNMPV1TrapConfig, SNMPV2cTrapConfig, SNMPV3TrapConfig, SNMPValue,
-    SNMPVarbind,
+    AuthProtocol, PrivProtocol, SNMPType, SNMPV1TrapConfig, SNMPV2cTrapConfig, SNMPV3TrapConfig,
+    SNMPValue, SNMPVarbind, build_snmpv1_trap_pdu, build_snmpv2c_trap_pdu, build_snmpv3_trap_pdu,
 };
 
 const DEFAULT_TRAP_OID: &str = "1.3.6.1.6.3.1.1.5.1";
@@ -61,7 +60,11 @@ Examples:
 ";
 
 #[derive(Parser, Debug)]
-#[command(name = "snmp-trap-generator", disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    name = "snmp-trap-generator",
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct Args {
     #[arg(long = "count", default_value_t = 10)]
     count: usize,
@@ -139,7 +142,10 @@ fn run() -> Result<(), String> {
 
     let is_ipv6 = base_ip_addr.is_ipv6();
     if args.ipv6 && !is_ipv6 {
-        return Err(format!("IPv6 flag set but base IP is IPv4: {}", args.base_ip));
+        return Err(format!(
+            "IPv6 flag set but base IP is IPv4: {}",
+            args.base_ip
+        ));
     }
     if !args.ipv6 && is_ipv6 {
         return Err(format!(
@@ -238,7 +244,12 @@ fn increment_ip(base_ip: IpAddr, i: usize) -> IpAddr {
     }
 }
 
-fn build_pdu(args: &Args, version: SNMPVersion, src_ip: IpAddr, seq: usize) -> Result<Vec<u8>, String> {
+fn build_pdu(
+    args: &Args,
+    version: SNMPVersion,
+    src_ip: IpAddr,
+    seq: usize,
+) -> Result<Vec<u8>, String> {
     let timestamp = now_unix_seconds();
     let varbinds = vec![
         SNMPVarbind {

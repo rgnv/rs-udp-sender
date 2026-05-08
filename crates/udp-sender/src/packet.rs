@@ -134,7 +134,8 @@ impl PacketBuilder {
         header[6] = 0;
         header[7] = 0;
 
-        let checksum = self.calculate_udp_checksum(&header, &pkt.payload, pkt.src_ip, pkt.dest_ip, is_ipv6);
+        let checksum =
+            self.calculate_udp_checksum(&header, &pkt.payload, pkt.src_ip, pkt.dest_ip, is_ipv6);
         header[6..8].copy_from_slice(&checksum.to_be_bytes());
 
         header
@@ -158,7 +159,7 @@ impl PacketBuilder {
             sum = (sum & 0xffff) + (sum >> 16);
         }
 
-        (!sum as u16) & 0xffff
+        !sum as u16
     }
 
     fn calculate_udp_checksum(
@@ -282,14 +283,11 @@ mod tests {
         "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
     );
 
-    const IPV4_EMPTY_PAYLOAD_HEX: &str =
-        "4500001c00000000401168c00101010108080808000000350008ed97";
+    const IPV4_EMPTY_PAYLOAD_HEX: &str = "4500001c00000000401168c00101010108080808000000350008ed97";
 
-    const IPV6_MINIMAL_HEX: &str =
-        "60000000000d114020010db800000000000000000000000120010db800000000000000000000000230390202000d2e5268656c6c6f";
+    const IPV6_MINIMAL_HEX: &str = "60000000000d114020010db800000000000000000000000120010db800000000000000000000000230390202000d2e5268656c6c6f";
 
-    const IPV6_FULL_ADDRESS_HEX: &str =
-        "60000000000c1140fe80000000000000aabbccfffeddeeffff0200000000000000000000000000018000076c000c2d7274657374";
+    const IPV6_FULL_ADDRESS_HEX: &str = "60000000000c1140fe80000000000000aabbccfffeddeeffff0200000000000000000000000000018000076c000c2d7274657374";
 
     fn build_packet(
         payload: Vec<u8>,
@@ -308,7 +306,9 @@ mod tests {
             flags: 0,
         };
 
-        PacketBuilder::new(mtu).build_packet(&pkt).expect("packet build should succeed")
+        PacketBuilder::new(mtu)
+            .build_packet(&pkt)
+            .expect("packet build should succeed")
     }
 
     #[test]
@@ -385,7 +385,9 @@ mod tests {
     fn golden_ipv6_full_address() {
         let out = build_packet(
             b"test".to_vec(),
-            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0xaabb, 0xccff, 0xfedd, 0xeeff)),
+            IpAddr::V6(Ipv6Addr::new(
+                0xfe80, 0, 0, 0, 0xaabb, 0xccff, 0xfedd, 0xeeff,
+            )),
             32768,
             IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1)),
             1900,
@@ -406,7 +408,9 @@ mod tests {
             flags: 0,
         };
 
-        let err = PacketBuilder::new(1428).build_packet(&pkt).expect_err("should exceed mtu");
+        let err = PacketBuilder::new(1428)
+            .build_packet(&pkt)
+            .expect_err("should exceed mtu");
         match err {
             PacketError::MTUExceeded { mtu, size } => {
                 assert_eq!(mtu, 1428);

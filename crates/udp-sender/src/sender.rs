@@ -2,7 +2,7 @@ use std::net::{IpAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 
 use nix::libc;
-use nix::sys::socket::{socket, AddressFamily, SockFlag, SockProtocol, SockType};
+use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType, socket};
 use nix::unistd::close;
 use thiserror::Error;
 
@@ -216,6 +216,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires root/CAP_NET_RAW"]
     fn test_create_raw_ipv4_socket() {
         let mut sender = UDPSender::new().expect("IPv4 raw socket must succeed as root");
         assert!(sender.fd_ipv4 >= 0);
@@ -223,6 +224,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires root/CAP_NET_RAW"]
     fn test_has_ipv6_detection() {
         let mut sender = UDPSender::new().expect("create sender");
         let has_v6 = sender.has_ipv6();
@@ -232,6 +234,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires root/CAP_NET_RAW"]
     fn test_send_ipv4_localhost() {
         let mut sender = UDPSender::new().expect("create sender");
         let payload = b"hello";
@@ -261,6 +264,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires root/CAP_NET_RAW"]
     fn test_send_ipv6_fails_when_no_ipv6() {
         let sender = UDPSender::new().expect("create sender");
         let mut sender = sender;
@@ -295,8 +299,7 @@ mod tests {
             );
 
             match result {
-                Err(SenderError::SendError(e))
-                    if e == nix::errno::Errno::EAFNOSUPPORT => {}
+                Err(SenderError::SendError(e)) if e == nix::errno::Errno::EAFNOSUPPORT => {}
                 other => panic!("expected EAFNOSUPPORT, got: {other:?}"),
             }
         }
@@ -305,19 +308,21 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires root/CAP_NET_RAW"]
     fn test_close_twice_no_double_free() {
         let mut sender = UDPSender::new().expect("create sender");
         sender.close().expect("first close must succeed");
         // Second close should not panic (fd set to -1/taken)
         let result = sender.close();
         match result {
-            Ok(()) => {} // close of -1/fd returns silently via nix's close
+            Ok(()) => {}                          // close of -1/fd returns silently via nix's close
             Err(SenderError::CloseError(_)) => {} // also acceptable
             Err(e) => panic!("unexpected error on second close: {e}"),
         }
     }
 
     #[test]
+    #[ignore = "requires root/CAP_NET_RAW"]
     fn test_send_empty_packet() {
         let mut sender = UDPSender::new().expect("create sender");
         // Headers-only packet (no payload) — still valid as IP+UDP frame
@@ -341,6 +346,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires root/CAP_NET_RAW"]
     fn test_version_mismatch_address() {
         let mut sender = UDPSender::new().expect("create sender");
         let packet = build_test_packet(b"test");

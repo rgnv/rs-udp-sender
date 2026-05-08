@@ -5,7 +5,9 @@ use clap::{ArgAction, Parser};
 use udp_sender::packet::PacketError;
 use udp_sender::protocol::ProtocolError;
 use udp_sender::sender::PacketSender;
-use udp_sender::{LogLevel, Logger, PacketBuilder, ProtocolStream, UDPSender, DEFAULT_MTU, MAX_MTU, MIN_MTU};
+use udp_sender::{
+    DEFAULT_MTU, LogLevel, Logger, MAX_MTU, MIN_MTU, PacketBuilder, ProtocolStream, UDPSender,
+};
 
 const DESCRIPTION_AND_EXAMPLES: &str = "Description:
   Reads binary protocol packets from stdin and sends them as UDP datagrams.
@@ -60,7 +62,9 @@ fn parse_mtu(s: &str) -> Result<usize, String> {
     if (MIN_MTU..=MAX_MTU).contains(&mtu) {
         Ok(mtu)
     } else {
-        Err(format!("MTU must be between {MIN_MTU} and {MAX_MTU} bytes (got {mtu})"))
+        Err(format!(
+            "MTU must be between {MIN_MTU} and {MAX_MTU} bytes (got {mtu})"
+        ))
     }
 }
 
@@ -78,20 +82,24 @@ fn is_unexpected_eof(err: &ProtocolError) -> bool {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let logger = Logger::new(if cli.verbose { LogLevel::Debug } else { LogLevel::Info });
+    let logger = Logger::new(if cli.verbose {
+        LogLevel::Debug
+    } else {
+        LogLevel::Info
+    });
 
     let mtu_s = cli.mtu.to_string();
     logger.info("Starting UDP sender", &[("mtu", &mtu_s)]);
 
     let mut sender = UDPSender::new()?;
-    let mut stream = ProtocolStream::new(std::io::stdin(), sender.has_ipv6(), cli.mtu, &logger);
+    let stream = ProtocolStream::new(std::io::stdin(), sender.has_ipv6(), cli.mtu, &logger);
     let builder = PacketBuilder::new(cli.mtu);
 
     let mut packets_sent: u64 = 0;
     let mut packets_dropped: u64 = 0;
     let mut bytes_sent: u64 = 0;
 
-    while let Some(item) = stream.next() {
+    for item in stream {
         match item {
             Ok(packet) => match builder.build_packet(&packet) {
                 Ok(raw_bytes) => {

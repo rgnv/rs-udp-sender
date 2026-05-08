@@ -50,11 +50,7 @@ impl LogLevel {
     }
 
     pub fn from_verbose(verbose: bool) -> Self {
-        if verbose {
-            Self::Debug
-        } else {
-            Self::Info
-        }
+        if verbose { Self::Debug } else { Self::Info }
     }
 }
 
@@ -86,7 +82,10 @@ mod tests {
 
     #[test]
     fn test_mtu_bounds() {
-        assert!(MIN_MTU >= 68, "min MTU must be at least 68 bytes (IPv4 minimum)");
+        assert!(
+            MIN_MTU >= 68,
+            "min MTU must be at least 68 bytes (IPv4 minimum)"
+        );
         assert!(MAX_MTU >= DEFAULT_MTU);
     }
 }
