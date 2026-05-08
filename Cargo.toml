@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/udp-sender",
+    "crates/packet-generator",
+    "crates/snmp-trap-generator",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"

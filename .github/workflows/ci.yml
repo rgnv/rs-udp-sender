@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test:
+    name: Unit Tests (No Root Required)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: swatinem/rust-cache@v2
+
+      - name: Run unit tests
+        run: cargo test --workspace --exclude rs-udp-sender --exclude rs-udp-sender-integration
+
+  integration-test:
+    name: Integration Tests (Root Required / Ignored)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: swatinem/rust-cache@v2
+
+      - name: Run ignored integration tests with sudo
+        run: sudo -E cargo test --workspace -- --ignored
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --workspace
+
+      - name: Create dist and checksums
+        run: |
+          mkdir -p dist
+          cp target/release/rs-udp-sender dist/
+          cp target/release/rs-udp-packet-generator dist/
+          cp target/release/rs-udp-snmp-trap-generator dist/
+          sha256sum dist/rs-udp-sender > dist/rs-udp-sender.sha256
+          sha256sum dist/rs-udp-packet-generator > dist/rs-udp-packet-generator.sha256
+          sha256sum dist/rs-udp-snmp-trap-generator > dist/rs-udp-snmp-trap-generator.sha256
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-build-artifacts
+          path: dist/*
+          retention-days: 30
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build
+        uses: swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check --all
+
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: swatinem/rust-cache@v2
+
+      - name: Run benchmarks
+        run: |
+          cargo bench --workspace | tee benchmark_results.txt
+          echo "### Benchmark Results" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat benchmark_results.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark_results.txt
+          retention-days: 30

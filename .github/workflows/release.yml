@@ -1,0 +1,294 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+      pkg_version: ${{ steps.version.outputs.PKG_VERSION }}
+      is_prerelease: ${{ steps.version.outputs.IS_PRERELEASE }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --workspace --exclude rs-udp-sender --exclude rs-udp-sender-integration
+
+      - name: Extract version info
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          PKG_VERSION="${VERSION#v}"
+
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "PKG_VERSION=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
+          if [[ "$VERSION" == *-* ]]; then
+            echo "IS_PRERELEASE=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "IS_PRERELEASE=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x64
+            fpm_arch_deb: amd64
+            fpm_arch_rpm: x86_64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            fpm_arch_deb: arm64
+            fpm_arch_rpm: aarch64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and build
+        uses: swatinem/rust-cache@v2
+
+      - name: Install cross toolchain dependencies
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+
+      - name: Build binaries
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --workspace --target "${{ matrix.target }}"
+
+      - name: Create archives and checksums
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/rs-udp-sender" "dist/rs-udp-sender-${{ matrix.arch }}"
+          cp "target/${{ matrix.target }}/release/rs-udp-packet-generator" "dist/rs-udp-packet-generator-${{ matrix.arch }}"
+          cp "target/${{ matrix.target }}/release/rs-udp-snmp-trap-generator" "dist/rs-udp-snmp-trap-generator-${{ matrix.arch }}"
+
+          tar -czf "dist/rs-udp-sender-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" -C dist "rs-udp-sender-${{ matrix.arch }}"
+          tar -czf "dist/rs-udp-packet-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" -C dist "rs-udp-packet-generator-${{ matrix.arch }}"
+          tar -czf "dist/rs-udp-snmp-trap-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" -C dist "rs-udp-snmp-trap-generator-${{ matrix.arch }}"
+
+          sha256sum "dist/rs-udp-sender-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" > "dist/rs-udp-sender-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz.sha256"
+          sha256sum "dist/rs-udp-packet-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" > "dist/rs-udp-packet-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz.sha256"
+          sha256sum "dist/rs-udp-snmp-trap-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" > "dist/rs-udp-snmp-trap-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz.sha256"
+
+      - name: Upload target artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 30
+
+  package-deb-rpm:
+    name: Package DEB/RPM
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download x64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-x64
+          path: dist/x64
+
+      - name: Download arm64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-arm64
+          path: dist/arm64
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev rubygems build-essential rpm
+          sudo gem install --no-document fpm
+
+      - name: Create DEB/RPM packages
+        run: |
+          mkdir -p packages
+          VERSION="${{ needs.test.outputs.pkg_version }}"
+
+          cp dist/x64/rs-udp-sender-x64 packages/rs-udp-sender-x64
+          cp dist/arm64/rs-udp-sender-arm64 packages/rs-udp-sender-arm64
+
+          fpm -s dir -t deb -n udp-sender -v "$VERSION" -a amd64 \
+            --prefix /usr/local/bin \
+            -p "packages/udp-sender-${VERSION}-x64.deb" \
+            packages/rs-udp-sender-x64=/usr/local/bin/rs-udp-sender
+
+          fpm -s dir -t deb -n udp-sender -v "$VERSION" -a arm64 \
+            --prefix /usr/local/bin \
+            -p "packages/udp-sender-${VERSION}-arm64.deb" \
+            packages/rs-udp-sender-arm64=/usr/local/bin/rs-udp-sender
+
+          fpm -s dir -t rpm -n udp-sender -v "$VERSION" -a x86_64 \
+            --prefix /usr/local/bin \
+            -p "packages/udp-sender-${VERSION}-x64.rpm" \
+            packages/rs-udp-sender-x64=/usr/local/bin/rs-udp-sender
+
+          fpm -s dir -t rpm -n udp-sender -v "$VERSION" -a aarch64 \
+            --prefix /usr/local/bin \
+            -p "packages/udp-sender-${VERSION}-arm64.rpm" \
+            packages/rs-udp-sender-arm64=/usr/local/bin/rs-udp-sender
+
+          for pkg in packages/*.deb packages/*.rpm; do
+            sha256sum "$pkg" > "$pkg.sha256"
+          done
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-artifacts
+          path: packages/*
+          retention-days: 30
+
+  docker:
+    name: Docker
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Create GitHub Release
+    needs: [test, package-deb-rpm, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download x64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-x64
+          path: dist/x64
+
+      - name: Download arm64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-arm64
+          path: dist/arm64
+
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: package-artifacts
+          path: dist/packages
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          CURRENT_TAG="${GITHUB_REF#refs/tags/}"
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -n 1)
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            PREVIOUS_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+
+          {
+            echo "CHANGELOG<<EOF"
+            echo ""
+            echo "### What's Changed"
+            echo ""
+            git log --no-merges --pretty=format:'- %s' "$PREVIOUS_TAG..HEAD"
+            echo ""
+            echo ""
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$PREVIOUS_TAG...$CURRENT_TAG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release notes
+        env:
+          CHANGELOG: ${{ steps.changelog.outputs.CHANGELOG }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          {
+            echo "## rs-udp-sender ${VERSION}"
+            echo ""
+            printf '%s\n' "$CHANGELOG"
+            echo ""
+            echo "### Artifacts"
+            echo "- Linux binaries (x64, arm64)"
+            echo "- DEB/RPM packages (x64, arm64)"
+            echo "- Docker image: ghcr.io/${{ github.repository }}:${VERSION}"
+          } > release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: |
+            dist/x64/*.tar.gz
+            dist/x64/*.tar.gz.sha256
+            dist/arm64/*.tar.gz
+            dist/arm64/*.tar.gz.sha256
+            dist/packages/*.deb
+            dist/packages/*.deb.sha256
+            dist/packages/*.rpm
+            dist/packages/*.rpm.sha256
+          draft: false
+          prerelease: ${{ needs.test.outputs.is_prerelease }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

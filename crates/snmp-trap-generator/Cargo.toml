@@ -1,0 +1,17 @@
+[package]
+name = "snmp-trap-generator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rs-udp-snmp-trap-generator"
+path = "src/main.rs"
+
+[dependencies]
+udp-sender = { path = "../udp-sender" }
+clap = { version = "4.6", features = ["derive"] }
+rasn = "0.28"
+rasn-snmp = "0.28"
+anyhow = "1.0"
