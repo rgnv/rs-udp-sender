@@ -206,6 +206,10 @@ Pipeline throughput for both is dominated by generator speed.
 | `make install` | Install binaries to `/usr/local/bin` |
 | `make docker` | Build Docker image |
 
+## AI Contributions
+
+This project leverages AI-assisted development. See [AI.md](AI.md) for the full AI contributions policy.
+
 ## Security Notes
 
 - Raw socket capabilities are powerful; use in controlled environments.
