@@ -1,10 +1,27 @@
-.PHONY: build test test-root lint format clean release bench
+.PHONY: help build test test-root lint format fmt clean release bench coverage dev install docker
 
 CARGO = cargo
 TARGET = target/release
 
 # Version from git describe, fallback to Cargo.toml version
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev")
+
+help:
+	@echo "Available targets:"
+	@echo "  help        Show this help"
+	@echo "  build       Build all binaries (release)"
+	@echo "  test        Run workspace tests"
+	@echo "  test-root   Run root-required tests (feature: root-tests)"
+	@echo "  lint        Run clippy with warnings denied"
+	@echo "  format      Check formatting"
+	@echo "  fmt         Apply formatting"
+	@echo "  clean       Clean build artifacts"
+	@echo "  release     Build and list release binaries"
+	@echo "  bench       Run workspace benchmarks"
+	@echo "  coverage    Generate HTML coverage report (cargo-tarpaulin)"
+	@echo "  dev         Watch and run check+test"
+	@echo "  install     Install binaries to /usr/local/bin"
+	@echo "  docker      Build Docker image"
 
 build:
 	$(CARGO) build --release
@@ -36,6 +53,11 @@ release: build
 
 bench:
 	$(CARGO) bench --workspace
+
+# Coverage (requires cargo-tarpaulin)
+coverage:
+	cargo tarpaulin --workspace --out Html --output-dir coverage
+	@echo "Coverage report generated: coverage/tarpaulin-report.html"
 
 # Development
 dev:

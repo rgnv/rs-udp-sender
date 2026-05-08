@@ -1,11 +1,19 @@
 use std::net::Ipv4Addr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aes::{Aes128, Aes192, Aes256};
+use cbc::cipher::block_padding::NoPadding;
+use cbc::cipher::{AsyncStreamCipher, BlockEncryptMut, KeyIvInit};
+use des::Des;
+use hmac::{Hmac, Mac};
+use md5::Md5;
 use rasn::ber;
 use rasn::types::ObjectIdentifier;
 use rasn_smi::v1::ToOpaque;
 use rasn_snmp::v3::SecurityParameters;
 use rasn_snmp::{v1, v2, v2c, v3};
+use sha1::Sha1;
+use sha2::{Sha224, Sha256, Sha384, Sha512};
 use thiserror::Error;
 
 use crate::constants::{DEFAULT_SNMP_ENGINE_ID, SNMP_SYS_UP_TIME_OID};
@@ -201,18 +209,19 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
         ));
     }
 
-    if config.auth_protocol != AuthProtocol::NoAuth || config.priv_protocol != PrivProtocol::NoPriv
-    {
-        return Err(SnmpError::KeyInitFailed(
-            "v3 key derivation not yet fully implemented — requires manual AES/DES key gen"
-                .to_string(),
-        ));
-    }
-
     let engine_id = config
         .engine_id
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| DEFAULT_SNMP_ENGINE_ID.to_string());
+    let engine_id_bytes = parse_engine_id(&engine_id);
+
+    let (auth_key, priv_key) = derive_usm_keys(
+        &config.auth_protocol,
+        &config.auth_password,
+        &config.priv_protocol,
+        &config.priv_password,
+        &engine_id_bytes,
+    )?;
 
     let mut variable_bindings = Vec::with_capacity(config.varbinds.len() + 2);
     variable_bindings.push(v2::VarBind {
@@ -234,7 +243,7 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
     );
 
     let scoped_pdu = v3::ScopedPdu {
-        engine_id: engine_id.as_bytes().to_vec().into(),
+        engine_id: engine_id_bytes.clone().into(),
         name: Vec::<u8>::new().into(),
         data: v2::Pdus::Trap(v2::Trap(v2::Pdu {
             request_id: request_id(),
@@ -250,12 +259,56 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
         _ => 0x03,
     };
 
+    let auth_placeholder_len = auth_parameter_len(&config.auth_protocol);
+    let mut auth_placeholder = vec![0u8; auth_placeholder_len];
+
+    let scoped_data = if config.priv_protocol == PrivProtocol::NoPriv {
+        v3::ScopedPduData::CleartextPdu(scoped_pdu)
+    } else {
+        let scoped_pdu_bytes = ber::encode(&scoped_pdu)
+            .map_err(|e| SnmpError::EncodingError(Box::new(e)))?;
+        let (encrypted_pdu, privacy_parameters) = encrypt_scoped_pdu(
+            &config.priv_protocol,
+            &priv_key,
+            config.engine_boots,
+            config.engine_time,
+            &scoped_pdu_bytes,
+        )?;
+        auth_placeholder = vec![0u8; auth_placeholder_len];
+        let security = v3::USMSecurityParameters {
+            authoritative_engine_id: engine_id_bytes.clone().into(),
+            authoritative_engine_boots: config.engine_boots.into(),
+            authoritative_engine_time: config.engine_time.into(),
+            user_name: config.username.as_bytes().to_vec().into(),
+            authentication_parameters: auth_placeholder.clone().into(),
+            privacy_parameters: privacy_parameters.into(),
+        };
+
+        let mut message = v3::Message {
+            version: 3.into(),
+            global_data: v3::HeaderData {
+                message_id: request_id().into(),
+                max_size: 65_507.into(),
+                flags: vec![flags].into(),
+                security_model: v3::USMSecurityParameters::ID.into(),
+            },
+            security_parameters: Vec::<u8>::new().into(),
+            scoped_data: v3::ScopedPduData::EncryptedPdu(encrypted_pdu.into()),
+        };
+
+        message.encode_security_parameters(rasn::Codec::Ber, &security).map_err(|e| {
+            SnmpError::EncodingError(Box::new(std::io::Error::other(e.to_string())))
+        })?;
+
+        return finalize_v3_message_with_auth(message, &config.auth_protocol, &auth_key);
+    };
+
     let security = v3::USMSecurityParameters {
-        authoritative_engine_id: engine_id.as_bytes().to_vec().into(),
+        authoritative_engine_id: engine_id_bytes.into(),
         authoritative_engine_boots: config.engine_boots.into(),
         authoritative_engine_time: config.engine_time.into(),
         user_name: config.username.as_bytes().to_vec().into(),
-        authentication_parameters: Vec::<u8>::new().into(),
+        authentication_parameters: auth_placeholder.into(),
         privacy_parameters: Vec::<u8>::new().into(),
     };
 
@@ -268,14 +321,405 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
             security_model: v3::USMSecurityParameters::ID.into(),
         },
         security_parameters: Vec::<u8>::new().into(),
-        scoped_data: v3::ScopedPduData::CleartextPdu(scoped_pdu),
+        scoped_data,
     };
 
     message
         .encode_security_parameters(rasn::Codec::Ber, &security)
         .map_err(|e| SnmpError::EncodingError(Box::new(std::io::Error::other(e.to_string()))))?;
 
-    ber::encode(&message).map_err(|e| SnmpError::EncodingError(Box::new(e)))
+    finalize_v3_message_with_auth(message, &config.auth_protocol, &auth_key)
+}
+
+fn finalize_v3_message_with_auth(
+    message: v3::Message,
+    auth_protocol: &AuthProtocol,
+    auth_key: &[u8],
+) -> Result<Vec<u8>, SnmpError> {
+    let mut packet = ber::encode(&message).map_err(|e| SnmpError::EncodingError(Box::new(e)))?;
+    if *auth_protocol == AuthProtocol::NoAuth {
+        return Ok(packet);
+    }
+
+    let auth_len = auth_parameter_len(auth_protocol);
+    if auth_len == 0 {
+        return Ok(packet);
+    }
+
+    let usm_encoded = message.security_parameters.as_ref();
+    let auth_offset_in_usm = find_auth_placeholder_offset(usm_encoded, auth_len).ok_or_else(|| {
+        SnmpError::KeyInitFailed("failed locating auth parameters in USM blob".to_string())
+    })?;
+    let usm_start = find_subsequence(&packet, usm_encoded).ok_or_else(|| {
+        SnmpError::KeyInitFailed("failed locating encoded USM security parameters".to_string())
+    })?;
+
+    let digest = compute_message_auth_digest(auth_protocol, auth_key, &packet)?;
+    if digest.len() < auth_len {
+        return Err(SnmpError::KeyInitFailed(
+            "auth digest shorter than required auth parameter length".to_string(),
+        ));
+    }
+
+    let auth_start = usm_start + auth_offset_in_usm + 2;
+    packet[auth_start..auth_start + auth_len].copy_from_slice(&digest[..auth_len]);
+    Ok(packet)
+}
+
+fn derive_usm_keys(
+    auth_protocol: &AuthProtocol,
+    auth_password: &str,
+    priv_protocol: &PrivProtocol,
+    priv_password: &str,
+    engine_id: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), SnmpError> {
+    let auth_key = if *auth_protocol == AuthProtocol::NoAuth {
+        Vec::new()
+    } else {
+        localized_key(*auth_protocol, auth_password.as_bytes(), engine_id)?
+    };
+
+    let priv_key = if *priv_protocol == PrivProtocol::NoPriv {
+        Vec::new()
+    } else {
+        derive_priv_key(*auth_protocol, *priv_protocol, priv_password.as_bytes(), engine_id)?
+    };
+
+    Ok((auth_key, priv_key))
+}
+
+fn derive_priv_key(
+    auth_protocol: AuthProtocol,
+    priv_protocol: PrivProtocol,
+    priv_password: &[u8],
+    engine_id: &[u8],
+) -> Result<Vec<u8>, SnmpError> {
+    if auth_protocol == AuthProtocol::NoAuth {
+        return Err(SnmpError::InvalidConfig(
+            "privacy requires authentication".to_string(),
+        ));
+    }
+
+    let key_len = match priv_protocol {
+        PrivProtocol::DES => 16,
+        PrivProtocol::AES => 16,
+        PrivProtocol::AES192 | PrivProtocol::AES192C => 24,
+        PrivProtocol::AES256 | PrivProtocol::AES256C => 32,
+        PrivProtocol::NoPriv => 0,
+    };
+    if key_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let base = localized_key(auth_protocol, priv_password, engine_id)?;
+    let extended = match priv_protocol {
+        PrivProtocol::AES | PrivProtocol::AES192C | PrivProtocol::AES256C => {
+            let second = localized_key(auth_protocol, &base, engine_id)?;
+            [base, second].concat()
+        }
+        PrivProtocol::AES192 | PrivProtocol::AES256 => {
+            let mut ext = base.clone();
+            ext.extend_from_slice(&hash_bytes(auth_protocol, &base)?);
+            ext
+        }
+        _ => base,
+    };
+
+    if extended.len() < key_len {
+        return Err(SnmpError::KeyInitFailed(format!(
+            "derived privacy key too short for {:?}: {} < {}",
+            priv_protocol,
+            extended.len(),
+            key_len
+        )));
+    }
+
+    Ok(extended[..key_len].to_vec())
+}
+
+fn localized_key(
+    auth_protocol: AuthProtocol,
+    password: &[u8],
+    engine_id: &[u8],
+) -> Result<Vec<u8>, SnmpError> {
+    if password.is_empty() {
+        return Err(SnmpError::MissingField("auth/priv password".to_string()));
+    }
+
+    let ku = hash_password_1mb(auth_protocol, password)?;
+    let mut local_input = Vec::with_capacity(ku.len() * 2 + engine_id.len());
+    local_input.extend_from_slice(&ku);
+    local_input.extend_from_slice(engine_id);
+    local_input.extend_from_slice(&ku);
+    hash_bytes(auth_protocol, &local_input)
+}
+
+fn hash_password_1mb(auth_protocol: AuthProtocol, password: &[u8]) -> Result<Vec<u8>, SnmpError> {
+    if password.is_empty() {
+        return Err(SnmpError::MissingField("password".to_string()));
+    }
+
+    let mut data = Vec::with_capacity(1_048_576);
+    while data.len() < 1_048_576 {
+        let need = 1_048_576 - data.len();
+        if need >= password.len() {
+            data.extend_from_slice(password);
+        } else {
+            data.extend_from_slice(&password[..need]);
+        }
+    }
+    hash_bytes(auth_protocol, &data)
+}
+
+fn hash_bytes(auth_protocol: AuthProtocol, data: &[u8]) -> Result<Vec<u8>, SnmpError> {
+    match auth_protocol {
+        AuthProtocol::NoAuth => Err(SnmpError::InvalidConfig(
+            "NoAuth does not define a hash function".to_string(),
+        )),
+        AuthProtocol::MD5 => {
+            use md5::Digest;
+            Ok(Md5::digest(data).to_vec())
+        }
+        AuthProtocol::SHA => {
+            use sha1::Digest;
+            Ok(Sha1::digest(data).to_vec())
+        }
+        AuthProtocol::SHA224 => {
+            use sha2::Digest;
+            Ok(Sha224::digest(data).to_vec())
+        }
+        AuthProtocol::SHA256 => {
+            use sha2::Digest;
+            Ok(Sha256::digest(data).to_vec())
+        }
+        AuthProtocol::SHA384 => {
+            use sha2::Digest;
+            Ok(Sha384::digest(data).to_vec())
+        }
+        AuthProtocol::SHA512 => {
+            use sha2::Digest;
+            Ok(Sha512::digest(data).to_vec())
+        }
+    }
+}
+
+fn auth_parameter_len(auth_protocol: &AuthProtocol) -> usize {
+    match auth_protocol {
+        AuthProtocol::NoAuth => 0,
+        AuthProtocol::MD5 | AuthProtocol::SHA => 12,
+        AuthProtocol::SHA224 => 16,
+        AuthProtocol::SHA256 => 24,
+        AuthProtocol::SHA384 => 32,
+        AuthProtocol::SHA512 => 48,
+    }
+}
+
+fn compute_message_auth_digest(
+    auth_protocol: &AuthProtocol,
+    auth_key: &[u8],
+    packet: &[u8],
+) -> Result<Vec<u8>, SnmpError> {
+    match auth_protocol {
+        AuthProtocol::NoAuth => Ok(Vec::new()),
+        AuthProtocol::MD5 | AuthProtocol::SHA => compute_rfc3414_digest(*auth_protocol, auth_key, packet),
+        AuthProtocol::SHA224 => {
+            let mut mac = <Hmac<Sha224> as Mac>::new_from_slice(auth_key)
+                .map_err(|e| SnmpError::KeyInitFailed(e.to_string()))?;
+            mac.update(packet);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        AuthProtocol::SHA256 => {
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(auth_key)
+                .map_err(|e| SnmpError::KeyInitFailed(e.to_string()))?;
+            mac.update(packet);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        AuthProtocol::SHA384 => {
+            let mut mac = <Hmac<Sha384> as Mac>::new_from_slice(auth_key)
+                .map_err(|e| SnmpError::KeyInitFailed(e.to_string()))?;
+            mac.update(packet);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        AuthProtocol::SHA512 => {
+            let mut mac = <Hmac<Sha512> as Mac>::new_from_slice(auth_key)
+                .map_err(|e| SnmpError::KeyInitFailed(e.to_string()))?;
+            mac.update(packet);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+    }
+}
+
+fn compute_rfc3414_digest(
+    auth_protocol: AuthProtocol,
+    auth_key: &[u8],
+    packet: &[u8],
+) -> Result<Vec<u8>, SnmpError> {
+    let mut ext_key = [0u8; 64];
+    let copy_len = auth_key.len().min(64);
+    ext_key[..copy_len].copy_from_slice(&auth_key[..copy_len]);
+
+    let mut k1 = [0u8; 64];
+    let mut k2 = [0u8; 64];
+    for i in 0..64 {
+        k1[i] = ext_key[i] ^ 0x36;
+        k2[i] = ext_key[i] ^ 0x5c;
+    }
+
+    match auth_protocol {
+        AuthProtocol::MD5 => {
+            use md5::Digest;
+            let mut h1 = Md5::new();
+            h1.update(k1);
+            h1.update(packet);
+            let d1 = h1.finalize();
+
+            let mut h2 = Md5::new();
+            h2.update(k2);
+            h2.update(d1);
+            Ok(h2.finalize().to_vec())
+        }
+        AuthProtocol::SHA => {
+            use sha1::Digest;
+            let mut h1 = Sha1::new();
+            h1.update(k1);
+            h1.update(packet);
+            let d1 = h1.finalize();
+
+            let mut h2 = Sha1::new();
+            h2.update(k2);
+            h2.update(d1);
+            Ok(h2.finalize().to_vec())
+        }
+        _ => Err(SnmpError::InvalidConfig(
+            "RFC3414 digest only valid for MD5/SHA1".to_string(),
+        )),
+    }
+}
+
+fn encrypt_scoped_pdu(
+    priv_protocol: &PrivProtocol,
+    priv_key: &[u8],
+    engine_boots: u32,
+    engine_time: u32,
+    scoped_pdu: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), SnmpError> {
+    let salt64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+
+    match priv_protocol {
+        PrivProtocol::NoPriv => Ok((scoped_pdu.to_vec(), Vec::new())),
+        PrivProtocol::AES | PrivProtocol::AES192 | PrivProtocol::AES256 | PrivProtocol::AES192C | PrivProtocol::AES256C => {
+            let privacy_parameters = salt64.to_be_bytes().to_vec();
+            let mut iv = [0u8; 16];
+            iv[..4].copy_from_slice(&engine_boots.to_be_bytes());
+            iv[4..8].copy_from_slice(&engine_time.to_be_bytes());
+            iv[8..].copy_from_slice(&privacy_parameters);
+
+            let mut ciphertext = scoped_pdu.to_vec();
+            match priv_protocol {
+                PrivProtocol::AES => {
+                    let cipher = cfb_mode::Encryptor::<Aes128>::new_from_slices(priv_key, &iv)
+                        .map_err(|e| SnmpError::KeyInitFailed(e.to_string()))?;
+                    cipher.encrypt(&mut ciphertext);
+                }
+                PrivProtocol::AES192 | PrivProtocol::AES192C => {
+                    let cipher = cfb_mode::Encryptor::<Aes192>::new_from_slices(priv_key, &iv)
+                        .map_err(|e| SnmpError::KeyInitFailed(e.to_string()))?;
+                    cipher.encrypt(&mut ciphertext);
+                }
+                PrivProtocol::AES256 | PrivProtocol::AES256C => {
+                    let cipher = cfb_mode::Encryptor::<Aes256>::new_from_slices(priv_key, &iv)
+                        .map_err(|e| SnmpError::KeyInitFailed(e.to_string()))?;
+                    cipher.encrypt(&mut ciphertext);
+                }
+                _ => unreachable!(),
+            }
+
+            Ok((ciphertext, privacy_parameters))
+        }
+        PrivProtocol::DES => {
+            if priv_key.len() < 16 {
+                return Err(SnmpError::KeyInitFailed(
+                    "DES privacy key must be at least 16 bytes".to_string(),
+                ));
+            }
+            let salt32 = (salt64 & 0xffff_ffff) as u32;
+            let mut privacy_parameters = vec![0u8; 8];
+            privacy_parameters[..4].copy_from_slice(&engine_boots.to_be_bytes());
+            privacy_parameters[4..].copy_from_slice(&salt32.to_be_bytes());
+
+            let mut iv = [0u8; 8];
+            for i in 0..8 {
+                iv[i] = priv_key[8 + i] ^ privacy_parameters[i];
+            }
+
+            let mut plaintext = scoped_pdu.to_vec();
+            let rem = plaintext.len() % 8;
+            if rem != 0 {
+                plaintext.extend(std::iter::repeat_n(0u8, 8 - rem));
+            }
+            let msg_len = plaintext.len();
+            let cipher = cbc::Encryptor::<Des>::new_from_slices(&priv_key[..8], &iv)
+                .map_err(|e| SnmpError::KeyInitFailed(e.to_string()))?;
+            cipher
+                .encrypt_padded_mut::<NoPadding>(&mut plaintext, msg_len)
+                .map_err(|e| SnmpError::KeyInitFailed(e.to_string()))?;
+
+            Ok((plaintext, privacy_parameters))
+        }
+    }
+}
+
+fn find_auth_placeholder_offset(usm_bytes: &[u8], auth_len: usize) -> Option<usize> {
+    if auth_len == 0 {
+        return None;
+    }
+    let mut needle = Vec::with_capacity(auth_len + 2);
+    needle.push(0x04);
+    needle.push(auth_len as u8);
+    needle.extend(std::iter::repeat_n(0u8, auth_len));
+    find_subsequence(usm_bytes, &needle)
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn parse_engine_id(engine_id: &str) -> Vec<u8> {
+    if let Some(decoded) = decode_hex(engine_id) {
+        return decoded;
+    }
+    engine_id.as_bytes().to_vec()
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() % 2 != 0 || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(trimmed.len() / 2);
+    let bytes = trimmed.as_bytes();
+    let to_nibble = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    };
+
+    for i in (0..bytes.len()).step_by(2) {
+        let hi = to_nibble(bytes[i])?;
+        let lo = to_nibble(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
 }
 
 fn parse_oid(oid: &str) -> Result<ObjectIdentifier, SnmpError> {
@@ -490,5 +934,45 @@ mod tests {
 
         let err = build_snmpv3_trap_pdu(config).expect_err("must fail on empty trap_oid");
         assert!(matches!(err, SnmpError::MissingField(field) if field == "trap_oid"));
+    }
+
+    #[test]
+    fn test_derive_usm_keys_sha_and_aes_lengths() {
+        let engine_id = parse_engine_id("800000020109840301");
+        let (auth_key, priv_key) = derive_usm_keys(
+            &AuthProtocol::SHA,
+            "authpass123",
+            &PrivProtocol::AES,
+            "privpass123",
+            &engine_id,
+        )
+        .expect("key derivation must succeed");
+
+        assert_eq!(auth_key.len(), 20, "SHA localized key must be 20 bytes");
+        assert_eq!(priv_key.len(), 16, "AES-128 privacy key must be 16 bytes");
+    }
+
+    #[test]
+    fn test_build_snmpv3_trap_pdu_auth_priv_succeeds() {
+        let config = SNMPV3TrapConfig {
+            username: "user".to_string(),
+            engine_id: Some("udp-sender".to_string()),
+            auth_protocol: AuthProtocol::SHA256,
+            auth_password: "authpass123".to_string(),
+            priv_protocol: PrivProtocol::AES,
+            priv_password: "privpass123".to_string(),
+            engine_boots: 1,
+            engine_time: 100,
+            trap_oid: "1.3.6.1.6.3.1.1.5.1".to_string(),
+            timestamp: Some(123),
+            varbinds: vec![SNMPVarbind {
+                oid: "1.3.6.1.2.1.1.5.0".to_string(),
+                asn_type: SNMPType::OctetString,
+                value: SNMPValue::Str("udp-sender".to_string()),
+            }],
+        };
+
+        let pdu = build_snmpv3_trap_pdu(config).expect("auth+priv v3 trap should encode");
+        assert!(!pdu.is_empty());
     }
 }

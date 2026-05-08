@@ -1,6 +1,7 @@
 use std::io;
 
 use clap::{ArgAction, Parser};
+use shadow_rs::shadow;
 
 use udp_sender::packet::PacketError;
 use udp_sender::protocol::ProtocolError;
@@ -8,6 +9,8 @@ use udp_sender::sender::PacketSender;
 use udp_sender::{
     DEFAULT_MTU, LogLevel, Logger, MAX_MTU, MIN_MTU, PacketBuilder, ProtocolStream, UDPSender,
 };
+
+shadow!(build);
 
 const DESCRIPTION_AND_EXAMPLES: &str = "Description:
   Reads binary protocol packets from stdin and sends them as UDP datagrams.
@@ -27,7 +30,12 @@ Examples:
 #[command(
     name = "udp-sender",
     bin_name = "udp-sender",
-    version = concat!("version ", env!("CARGO_PKG_VERSION")),
+    version = shadow_rs::formatcp!(
+        "version {} (commit {}, built {})",
+        build::PKG_VERSION,
+        build::SHORT_COMMIT,
+        build::BUILD_TIME_2822
+    ),
     disable_help_flag = true,
     disable_version_flag = true,
     after_help = DESCRIPTION_AND_EXAMPLES,

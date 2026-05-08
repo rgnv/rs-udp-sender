@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -13,6 +13,7 @@ permissions:
   packages: write
 
 jobs:
+  # ── Gate: tests + version extraction ────────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -44,12 +45,15 @@ jobs:
 
           if [[ "$VERSION" == *-* ]]; then
             echo "IS_PRERELEASE=true" >> "$GITHUB_OUTPUT"
+            echo "Detected pre-release: $VERSION"
           else
             echo "IS_PRERELEASE=false" >> "$GITHUB_OUTPUT"
+            echo "Detected stable release: $VERSION"
           fi
 
+  # ── Build: cross-compile binaries, archives, checksums, DEB/RPM ────
   build:
-    name: Build (${{ matrix.target }})
+    name: Build Artifacts (${{ matrix.target }})
     needs: test
     runs-on: ubuntu-latest
     strategy:
@@ -57,13 +61,25 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            arch: x64
-            fpm_arch_deb: amd64
-            fpm_arch_rpm: x86_64
+            os: linux
+            suffix: linux-x64
+            bin_suffix: linux-x64
+            artifact_name: build-linux-x64
           - target: aarch64-unknown-linux-gnu
-            arch: arm64
-            fpm_arch_deb: arm64
-            fpm_arch_rpm: aarch64
+            os: linux
+            suffix: linux-arm64
+            bin_suffix: linux-arm64
+            artifact_name: build-linux-arm64
+          - target: x86_64-apple-darwin
+            os: darwin
+            suffix: darwin-x64
+            bin_suffix: darwin-x64
+            artifact_name: build-darwin-x64
+          - target: aarch64-apple-darwin
+            os: darwin
+            suffix: darwin-arm64
+            bin_suffix: darwin-arm64
+            artifact_name: build-darwin-arm64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -76,109 +92,89 @@ jobs:
       - name: Cache cargo registry and build
         uses: swatinem/rust-cache@v2
 
-      - name: Install cross toolchain dependencies
-        run: |
-          sudo apt-get update
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-          fi
+      - name: Install cross
+        run: cargo install cross --locked
 
-      - name: Build binaries
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: |
-          cargo build --release --workspace --target "${{ matrix.target }}"
+      - name: Build rs-udp-sender
+        run: cross build --release --target "${{ matrix.target }}" --bin rs-udp-sender
 
-      - name: Create archives and checksums
+      - name: Create archive and checksum
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/rs-udp-sender" "dist/rs-udp-sender-${{ matrix.arch }}"
-          cp "target/${{ matrix.target }}/release/rs-udp-packet-generator" "dist/rs-udp-packet-generator-${{ matrix.arch }}"
-          cp "target/${{ matrix.target }}/release/rs-udp-snmp-trap-generator" "dist/rs-udp-snmp-trap-generator-${{ matrix.arch }}"
 
-          tar -czf "dist/rs-udp-sender-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" -C dist "rs-udp-sender-${{ matrix.arch }}"
-          tar -czf "dist/rs-udp-packet-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" -C dist "rs-udp-packet-generator-${{ matrix.arch }}"
-          tar -czf "dist/rs-udp-snmp-trap-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" -C dist "rs-udp-snmp-trap-generator-${{ matrix.arch }}"
+          BINARY_SRC="target/${{ matrix.target }}/release/rs-udp-sender"
+          BINARY_NAME="rs-udp-sender-${{ matrix.bin_suffix }}"
+          cp "$BINARY_SRC" "dist/$BINARY_NAME"
 
-          sha256sum "dist/rs-udp-sender-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" > "dist/rs-udp-sender-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz.sha256"
-          sha256sum "dist/rs-udp-packet-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" > "dist/rs-udp-packet-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz.sha256"
-          sha256sum "dist/rs-udp-snmp-trap-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" > "dist/rs-udp-snmp-trap-generator-${{ needs.test.outputs.version }}-linux-${{ matrix.arch }}.tar.gz.sha256"
+          ARCHIVE="rs-udp-sender-${{ needs.test.outputs.version }}-${{ matrix.suffix }}.tar.gz"
+          tar -czf "dist/$ARCHIVE" -C dist "$BINARY_NAME"
+          sha256sum "dist/$ARCHIVE" > "dist/$ARCHIVE.sha256"
 
-      - name: Upload target artifacts
+          echo "=== Built archive ==="
+          ls -lh "dist/$ARCHIVE"
+          cat "dist/$ARCHIVE.sha256"
+
+      - name: Install packaging tools
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev rubygems build-essential rpm libcap2-bin
+          sudo gem install --no-document fpm
+
+      - name: Create DEB and RPM packages
+        if: matrix.os == 'linux'
+        run: |
+          PKG_VERSION="${{ needs.test.outputs.pkg_version }}"
+
+          # Architecture mapping for fpm
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            DEB_ARCH="amd64"
+            RPM_ARCH="x86_64"
+            PKG_SUFFIX="x64"
+          else
+            DEB_ARCH="arm64"
+            RPM_ARCH="aarch64"
+            PKG_SUFFIX="arm64"
+          fi
+
+          # ── DEB package ───────────────────────────────────────────
+          fpm -s dir -t deb \
+            -n rs-udp-sender -v "$PKG_VERSION" -a "$DEB_ARCH" \
+            --description "Rust UDP packet sender with IP/port spoofing support" \
+            --url "https://github.com/${{ github.repository }}" \
+            --maintainer "Cribl <support@cribl.io>" \
+            --license "MIT" --vendor "Cribl, Inc." \
+            --after-install scripts/postinstall.sh \
+            --before-remove scripts/preremove.sh \
+            -p "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.deb" \
+            "dist/rs-udp-sender-${{ matrix.bin_suffix }}=/usr/bin/rs-udp-sender"
+
+          # ── RPM package ───────────────────────────────────────────
+          fpm -s dir -t rpm \
+            -n rs-udp-sender -v "$PKG_VERSION" -a "$RPM_ARCH" \
+            --description "Rust UDP packet sender with IP/port spoofing support" \
+            --url "https://github.com/${{ github.repository }}" \
+            --maintainer "Cribl <support@cribl.io>" \
+            --license "MIT" --vendor "Cribl, Inc." \
+            --after-install scripts/postinstall.sh \
+            --before-remove scripts/preremove.sh \
+            -p "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.rpm" \
+            "dist/rs-udp-sender-${{ matrix.bin_suffix }}=/usr/bin/rs-udp-sender"
+
+          sha256sum "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.deb" > "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.deb.sha256"
+          sha256sum "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.rpm" > "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.rpm.sha256"
+
+      - name: Upload matrix artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ matrix.arch }}
+          name: ${{ matrix.artifact_name }}
           path: dist/*
           retention-days: 30
 
-  package-deb-rpm:
-    name: Package DEB/RPM
-    needs: [test, build]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download x64 artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-x64
-          path: dist/x64
-
-      - name: Download arm64 artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-arm64
-          path: dist/arm64
-
-      - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ruby ruby-dev rubygems build-essential rpm
-          sudo gem install --no-document fpm
-
-      - name: Create DEB/RPM packages
-        run: |
-          mkdir -p packages
-          VERSION="${{ needs.test.outputs.pkg_version }}"
-
-          cp dist/x64/rs-udp-sender-x64 packages/rs-udp-sender-x64
-          cp dist/arm64/rs-udp-sender-arm64 packages/rs-udp-sender-arm64
-
-          fpm -s dir -t deb -n udp-sender -v "$VERSION" -a amd64 \
-            --prefix /usr/local/bin \
-            -p "packages/udp-sender-${VERSION}-x64.deb" \
-            packages/rs-udp-sender-x64=/usr/local/bin/rs-udp-sender
-
-          fpm -s dir -t deb -n udp-sender -v "$VERSION" -a arm64 \
-            --prefix /usr/local/bin \
-            -p "packages/udp-sender-${VERSION}-arm64.deb" \
-            packages/rs-udp-sender-arm64=/usr/local/bin/rs-udp-sender
-
-          fpm -s dir -t rpm -n udp-sender -v "$VERSION" -a x86_64 \
-            --prefix /usr/local/bin \
-            -p "packages/udp-sender-${VERSION}-x64.rpm" \
-            packages/rs-udp-sender-x64=/usr/local/bin/rs-udp-sender
-
-          fpm -s dir -t rpm -n udp-sender -v "$VERSION" -a aarch64 \
-            --prefix /usr/local/bin \
-            -p "packages/udp-sender-${VERSION}-arm64.rpm" \
-            packages/rs-udp-sender-arm64=/usr/local/bin/rs-udp-sender
-
-          for pkg in packages/*.deb packages/*.rpm; do
-            sha256sum "$pkg" > "$pkg.sha256"
-          done
-
-      - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-artifacts
-          path: packages/*
-          retention-days: 30
-
+  # ── Docker: multi-arch container images ─────────────────────────────
   docker:
-    name: Docker
-    needs: [test, build]
+    name: Docker Images
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -197,21 +193,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract Docker metadata
+        id: docker_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.test.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # ── Release: changelog, release notes, GitHub Release ──────────────
   release:
     name: Create GitHub Release
-    needs: [test, package-deb-rpm, docker]
+    needs: [test, build, docker]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -219,28 +228,34 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download x64 artifacts
+      - name: Download linux x64 artifacts
         uses: actions/download-artifact@v4
         with:
-          name: build-x64
-          path: dist/x64
+          name: build-linux-x64
+          path: dist
 
-      - name: Download arm64 artifacts
+      - name: Download linux arm64 artifacts
         uses: actions/download-artifact@v4
         with:
-          name: build-arm64
-          path: dist/arm64
+          name: build-linux-arm64
+          path: dist
 
-      - name: Download package artifacts
+      - name: Download darwin x64 artifacts
         uses: actions/download-artifact@v4
         with:
-          name: package-artifacts
-          path: dist/packages
+          name: build-darwin-x64
+          path: dist
+
+      - name: Download darwin arm64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-darwin-arm64
+          path: dist
 
       - name: Generate changelog
         id: changelog
         run: |
-          CURRENT_TAG="${GITHUB_REF#refs/tags/}"
+          CURRENT_TAG="${{ needs.test.outputs.version }}"
           PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -n 1)
 
           if [ -z "$PREVIOUS_TAG" ]; then
@@ -263,16 +278,34 @@ jobs:
         env:
           CHANGELOG: ${{ steps.changelog.outputs.CHANGELOG }}
         run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
+          V="${{ needs.test.outputs.version }}"
+          PV="${{ needs.test.outputs.pkg_version }}"
           {
-            echo "## rs-udp-sender ${VERSION}"
+            echo "## rs-udp-sender ${V}"
             echo ""
+            if [ "${{ needs.test.outputs.is_prerelease }}" = "true" ]; then
+              echo "> ⚠️ **Pre-release**: This is a pre-release version."
+              echo ""
+            fi
             printf '%s\n' "$CHANGELOG"
             echo ""
-            echo "### Artifacts"
-            echo "- Linux binaries (x64, arm64)"
-            echo "- DEB/RPM packages (x64, arm64)"
-            echo "- Docker image: ghcr.io/${{ github.repository }}:${VERSION}"
+            echo "### Downloads"
+            echo ""
+            echo "| Type | Architecture | File |"
+            echo "|------|--------------|------|"
+            echo "| Binary tarball | Linux x64 | [\`rs-udp-sender-${V}-linux-x64.tar.gz\`](https://github.com/${{ github.repository }}/releases/download/${V}/rs-udp-sender-${V}-linux-x64.tar.gz) |"
+            echo "| Binary tarball | Linux ARM64 | [\`rs-udp-sender-${V}-linux-arm64.tar.gz\`](https://github.com/${{ github.repository }}/releases/download/${V}/rs-udp-sender-${V}-linux-arm64.tar.gz) |"
+            echo "| Binary tarball | macOS x64 | [\`rs-udp-sender-${V}-darwin-x64.tar.gz\`](https://github.com/${{ github.repository }}/releases/download/${V}/rs-udp-sender-${V}-darwin-x64.tar.gz) |"
+            echo "| Binary tarball | macOS ARM64 | [\`rs-udp-sender-${V}-darwin-arm64.tar.gz\`](https://github.com/${{ github.repository }}/releases/download/${V}/rs-udp-sender-${V}-darwin-arm64.tar.gz) |"
+            echo "| DEB package | x64 | [\`rs-udp-sender-${PV}-x64.deb\`](https://github.com/${{ github.repository }}/releases/download/${V}/rs-udp-sender-${PV}-x64.deb) |"
+            echo "| DEB package | ARM64 | [\`rs-udp-sender-${PV}-arm64.deb\`](https://github.com/${{ github.repository }}/releases/download/${V}/rs-udp-sender-${PV}-arm64.deb) |"
+            echo "| RPM package | x64 | [\`rs-udp-sender-${PV}-x64.rpm\`](https://github.com/${{ github.repository }}/releases/download/${V}/rs-udp-sender-${PV}-x64.rpm) |"
+            echo "| RPM package | ARM64 | [\`rs-udp-sender-${PV}-arm64.rpm\`](https://github.com/${{ github.repository }}/releases/download/${V}/rs-udp-sender-${PV}-arm64.rpm) |"
+            echo ""
+            echo "### Container Image"
+            echo "- \`ghcr.io/${{ github.repository }}:${PV}\`"
+            echo "- \`ghcr.io/${{ github.repository }}:latest\`"
+            echo "- Architectures: linux/amd64, linux/arm64"
           } > release_notes.md
 
       - name: Create GitHub Release
@@ -280,15 +313,51 @@ jobs:
         with:
           body_path: release_notes.md
           files: |
-            dist/x64/*.tar.gz
-            dist/x64/*.tar.gz.sha256
-            dist/arm64/*.tar.gz
-            dist/arm64/*.tar.gz.sha256
-            dist/packages/*.deb
-            dist/packages/*.deb.sha256
-            dist/packages/*.rpm
-            dist/packages/*.rpm.sha256
+            dist/rs-udp-sender-${{ needs.test.outputs.version }}-linux-x64.tar.gz
+            dist/rs-udp-sender-${{ needs.test.outputs.version }}-linux-x64.tar.gz.sha256
+            dist/rs-udp-sender-${{ needs.test.outputs.version }}-linux-arm64.tar.gz
+            dist/rs-udp-sender-${{ needs.test.outputs.version }}-linux-arm64.tar.gz.sha256
+            dist/rs-udp-sender-${{ needs.test.outputs.version }}-darwin-x64.tar.gz
+            dist/rs-udp-sender-${{ needs.test.outputs.version }}-darwin-x64.tar.gz.sha256
+            dist/rs-udp-sender-${{ needs.test.outputs.version }}-darwin-arm64.tar.gz
+            dist/rs-udp-sender-${{ needs.test.outputs.version }}-darwin-arm64.tar.gz.sha256
+            dist/*.deb
+            dist/*.deb.sha256
+            dist/*.rpm
+            dist/*.rpm.sha256
           draft: false
           prerelease: ${{ needs.test.outputs.is_prerelease }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Summary ────────────────────────────────────────────────────────
+  summary:
+    name: Release Summary
+    needs: [test, release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print summary
+        run: |
+          V="${{ needs.test.outputs.version }}"
+          PV="${{ needs.test.outputs.pkg_version }}"
+
+          {
+            echo "## Release ${V} Published! 🚀"
+            echo ""
+            echo "### Built Artifacts"
+            echo "- ✅ Linux x64 tarball"
+            echo "- ✅ Linux ARM64 tarball"
+            echo "- ✅ macOS x64 tarball"
+            echo "- ✅ macOS ARM64 tarball"
+            echo "- ✅ DEB (x64, arm64)"
+            echo "- ✅ RPM (x64, arm64)"
+            echo ""
+            echo "### Container Images"
+            echo "- ✅ \`ghcr.io/${{ github.repository }}:${PV}\`"
+            echo "- ✅ \`ghcr.io/${{ github.repository }}:latest\`"
+            echo "- Architectures: linux/amd64, linux/arm64"
+            echo ""
+            echo "### Release URL"
+            echo "https://github.com/${{ github.repository }}/releases/tag/${V}"
+          } >> "$GITHUB_STEP_SUMMARY"

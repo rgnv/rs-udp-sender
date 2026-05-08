@@ -14,6 +14,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 FROM rust:1.94-alpine AS builder
 RUN apk add --no-cache musl-dev
 WORKDIR /app
+ARG VERSION=dev
 COPY --from=cacher /app/target target
 COPY --from=cacher /usr/local/cargo /usr/local/cargo
 COPY . .
@@ -21,7 +22,10 @@ RUN cargo build --release --bin rs-udp-sender && \
     strip target/release/rs-udp-sender
 
 FROM alpine:latest
+ARG VERSION=dev
 RUN addgroup -S udp && adduser -S udp -G udp
 COPY --from=builder /app/target/release/rs-udp-sender /usr/local/bin/rs-udp-sender
+ENV RS_UDP_SENDER_VERSION=${VERSION}
+LABEL org.opencontainers.image.version=${VERSION}
 USER udp
 ENTRYPOINT ["rs-udp-sender"]
