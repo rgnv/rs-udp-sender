@@ -246,7 +246,7 @@ jobs:
   # ── Release: changelog, release notes, GitHub Release ──────────────
   release:
     name: Create GitHub Release
-    needs: [test, build, docker]
+    needs: [test, build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
