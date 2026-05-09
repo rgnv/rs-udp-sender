@@ -103,6 +103,15 @@ impl PacketSender for UDPSender {
                 let _ = src_v4;
                 let socket_addr = SocketAddrV4::new(dest_v4, dest_port);
                 let sockaddr = libc::sockaddr_in {
+                    #[cfg(any(
+                        target_os = "macos",
+                        target_os = "ios",
+                        target_os = "freebsd",
+                        target_os = "openbsd",
+                        target_os = "netbsd",
+                        target_os = "dragonfly"
+                    ))]
+                    sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
                     sin_family: libc::AF_INET as libc::sa_family_t,
                     sin_port: socket_addr.port().to_be(),
                     sin_addr: libc::in_addr {
@@ -134,6 +143,15 @@ impl PacketSender for UDPSender {
                 })?;
                 let socket_addr = SocketAddrV6::new(dest_v6, 0, 0, 0);
                 let sockaddr = libc::sockaddr_in6 {
+                    #[cfg(any(
+                        target_os = "macos",
+                        target_os = "ios",
+                        target_os = "freebsd",
+                        target_os = "openbsd",
+                        target_os = "netbsd",
+                        target_os = "dragonfly"
+                    ))]
+                    sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
                     sin6_family: libc::AF_INET6 as libc::sa_family_t,
                     sin6_port: socket_addr.port().to_be(),
                     sin6_flowinfo: socket_addr.flowinfo(),
