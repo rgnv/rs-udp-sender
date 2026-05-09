@@ -1,0 +1,19 @@
+# started on Sat May  9 10:31:18 2026
+
+
+ Performance counter stats for 'bash -c taskset -c 1 "$PG" -count 10000000 -dest-ip 192.0.2.99 -dest-port 5000 -message "$MSG" | taskset -c 2 "$SND" -m 1500':
+
+   196,282,017,892      cpu_atom/instructions/           #    0.82  insn per cycle              (0.00%)
+   608,500,472,766      cpu_core/instructions/           #    1.84  insn per cycle              (100.00%)
+   239,904,318,720      cpu_atom/cycles/                                                        (0.00%)
+   330,283,749,917      cpu_core/cycles/                                                        (100.00%)
+         3,246,077      context-switches                                                      
+     2,247,708,468      cpu_atom/cache-misses/                                                  (0.00%)
+     1,511,582,946      cpu_core/cache-misses/                                                  (100.00%)
+
+      68.237616147 seconds time elapsed
+
+      47.927062000 seconds user
+      64.275675000 seconds sys
+
+

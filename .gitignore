@@ -3,4 +3,5 @@
 .DS_Store
 .sisyphus/run-continuation/
 .sisyphus/
+.security/
 homebrew-rs-udp-sender/

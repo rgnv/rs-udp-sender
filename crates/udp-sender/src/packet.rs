@@ -418,4 +418,195 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn mtu_exceeded_ipv6_uses_40_byte_header() {
+        let pkt = Packet {
+            src_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            dest_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            src_port: 1,
+            dest_port: 2,
+            payload: vec![0u8; 1453],
+            flags: 0,
+        };
+
+        let err = PacketBuilder::new(1500)
+            .build_packet(&pkt)
+            .expect_err("ipv6 should exceed 1500 mtu at payload 1453 (40+8+1453=1501)");
+        match err {
+            PacketError::MTUExceeded { mtu, size } => {
+                assert_eq!(mtu, 1500);
+                assert_eq!(size, 40 + 8 + 1453);
+            }
+        }
+    }
+
+    #[test]
+    fn mtu_boundary_exact_fit_succeeds_ipv4() {
+        let pkt = Packet {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 1,
+            dest_port: 2,
+            payload: vec![0u8; 1472],
+            flags: 0,
+        };
+
+        let out = PacketBuilder::new(1500)
+            .build_packet(&pkt)
+            .expect("exact mtu fit should succeed");
+        assert_eq!(out.len(), 1500);
+    }
+
+    #[test]
+    fn mtu_boundary_exact_fit_succeeds_ipv6() {
+        let pkt = Packet {
+            src_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            dest_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            src_port: 1,
+            dest_port: 2,
+            payload: vec![0u8; 1452],
+            flags: 0,
+        };
+
+        let out = PacketBuilder::new(1500)
+            .build_packet(&pkt)
+            .expect("exact ipv6 mtu fit should succeed");
+        assert_eq!(out.len(), 1500);
+    }
+
+    #[test]
+    fn packet_error_display_format() {
+        let err = PacketError::MTUExceeded {
+            mtu: 1500,
+            size: 1600,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "packet size 1600 exceeds MTU limit of 1500 bytes"
+        );
+    }
+
+    #[test]
+    fn default_builder_uses_default_mtu() {
+        let builder = PacketBuilder::default();
+        let pkt = Packet {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 1,
+            dest_port: 2,
+            payload: vec![0u8; 1473],
+            flags: 0,
+        };
+        let err = builder
+            .build_packet(&pkt)
+            .expect_err("default mtu (1500) should reject 20+8+1473=1501");
+        match err {
+            PacketError::MTUExceeded { mtu, .. } => assert_eq!(mtu, 1500),
+        }
+    }
+
+    #[test]
+    fn ipv4_header_field_layout() {
+        let pkt = Packet {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 12345,
+            dest_port: 514,
+            payload: b"hello".to_vec(),
+            flags: 0,
+        };
+        let out = PacketBuilder::new(1500).build_packet(&pkt).unwrap();
+        assert_eq!(out[0], 0x45, "version=4, IHL=5");
+        assert_eq!(out[1], 0x00, "DSCP/ECN=0");
+        assert_eq!(u16::from_be_bytes([out[2], out[3]]), 33, "total length");
+        assert_eq!(out[8], 64, "TTL=64");
+        assert_eq!(out[9], 17, "protocol=UDP");
+        assert_eq!(&out[12..16], &[10, 0, 0, 1], "src ip");
+        assert_eq!(&out[16..20], &[10, 0, 0, 2], "dest ip");
+    }
+
+    #[test]
+    fn ipv6_header_field_layout() {
+        let pkt = Packet {
+            src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)),
+            dest_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 2)),
+            src_port: 12345,
+            dest_port: 514,
+            payload: b"hello".to_vec(),
+            flags: 0,
+        };
+        let out = PacketBuilder::new(1500).build_packet(&pkt).unwrap();
+        assert_eq!(out[0], 0x60, "version=6");
+        assert_eq!(out[6], 17, "next header=UDP");
+        assert_eq!(out[7], 64, "hop limit=64");
+        assert_eq!(u16::from_be_bytes([out[4], out[5]]), 13, "payload length");
+    }
+
+    #[test]
+    fn udp_header_ports_big_endian() {
+        let pkt = Packet {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 0xABCD,
+            dest_port: 0x1234,
+            payload: b"x".to_vec(),
+            flags: 0,
+        };
+        let out = PacketBuilder::new(1500).build_packet(&pkt).unwrap();
+        assert_eq!(&out[20..22], &[0xAB, 0xCD], "src port BE");
+        assert_eq!(&out[22..24], &[0x12, 0x34], "dest port BE");
+    }
+
+    #[test]
+    fn udp_header_extreme_ports() {
+        let pkt = Packet {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 0,
+            dest_port: 0xFFFF,
+            payload: b"x".to_vec(),
+            flags: 0,
+        };
+        let out = PacketBuilder::new(1500).build_packet(&pkt).unwrap();
+        assert_eq!(&out[20..22], &[0x00, 0x00]);
+        assert_eq!(&out[22..24], &[0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn ipv4_checksum_is_valid_rfc1071() {
+        let pkt = Packet {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 12345,
+            dest_port: 514,
+            payload: b"hello".to_vec(),
+            flags: 0,
+        };
+        let out = PacketBuilder::new(1500).build_packet(&pkt).unwrap();
+        let mut sum: u32 = 0;
+        let mut i = 0;
+        while i + 1 < 20 {
+            sum = sum.wrapping_add(u16::from_be_bytes([out[i], out[i + 1]]) as u32);
+            i += 2;
+        }
+        while sum > 0xffff {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        assert_eq!(sum, 0xffff, "IPv4 checksum verification per RFC 1071");
+    }
+
+    #[test]
+    fn ipv6_no_ip_header_checksum() {
+        let pkt = Packet {
+            src_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            dest_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            src_port: 1,
+            dest_port: 2,
+            payload: b"x".to_vec(),
+            flags: 0,
+        };
+        let out = PacketBuilder::new(1500).build_packet(&pkt).unwrap();
+        assert_eq!(out.len(), 40 + 8 + 1, "ipv6 has no header checksum field");
+    }
 }

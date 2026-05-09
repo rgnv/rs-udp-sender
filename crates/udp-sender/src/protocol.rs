@@ -757,4 +757,200 @@ mod tests {
             other => panic!("expected ReadPayload error, got {other:?}"),
         }
     }
+
+    /// A `Read` adapter that returns `ErrorKind::Interrupted` for the first
+    /// `interrupt_count` calls and then delegates to an inner cursor. Used to
+    /// exercise the retry loop in `read_magic`.
+    struct InterruptingReader {
+        inner: Cursor<Vec<u8>>,
+        interrupts_left: usize,
+    }
+
+    impl InterruptingReader {
+        fn new(data: Vec<u8>, interrupts: usize) -> Self {
+            Self {
+                inner: Cursor::new(data),
+                interrupts_left: interrupts,
+            }
+        }
+    }
+
+    impl io::Read for InterruptingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.interrupts_left > 0 {
+                self.interrupts_left -= 1;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted"));
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    /// A `Read` adapter that surfaces a custom non-Interrupted error on the
+    /// first call. Used to verify `read_magic` propagates real I/O errors.
+    struct FailingMagicReader {
+        called: bool,
+    }
+
+    impl io::Read for FailingMagicReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            if !self.called {
+                self.called = true;
+                return Err(io::Error::new(io::ErrorKind::ConnectionReset, "boom"));
+            }
+            Ok(0)
+        }
+    }
+
+    /// A `Read` adapter that always returns one byte at a time from an inner
+    /// buffer. Forces `read_magic` to accumulate across multiple Ok(n>0) calls.
+    struct OneByteAtATimeReader {
+        inner: Cursor<Vec<u8>>,
+    }
+
+    impl io::Read for OneByteAtATimeReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let mut tiny = [0u8; 1];
+            match self.inner.read(&mut tiny)? {
+                0 => Ok(0),
+                _ => {
+                    buf[0] = tiny[0];
+                    Ok(1)
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn read_magic_retries_through_interrupted_errors() {
+        let data = encode_packet(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            1111,
+            2222,
+            b"hello",
+            0,
+        );
+        let reader = InterruptingReader::new(data, 5);
+        let logger = test_logger();
+        let mut stream = ProtocolStream::new(reader, true, 1500, &logger);
+
+        let packet = stream
+            .next()
+            .expect("expected a packet")
+            .expect("packet parse should succeed despite interrupts");
+        assert_eq!(packet.payload, b"hello");
+        assert_eq!(packet.src_port, 1111);
+        assert_eq!(packet.dest_port, 2222);
+    }
+
+    #[test]
+    fn read_magic_propagates_non_interrupted_error() {
+        let logger = test_logger();
+        let mut stream =
+            ProtocolStream::new(FailingMagicReader { called: false }, true, 1500, &logger);
+
+        match stream.next() {
+            Some(Err(ProtocolError::ReadMagic { read, source })) => {
+                assert_eq!(read, 0);
+                assert_eq!(source.kind(), io::ErrorKind::ConnectionReset);
+            }
+            other => panic!("expected ReadMagic(ConnectionReset) error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_magic_accumulates_partial_reads() {
+        let data = encode_packet(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+            5000,
+            6000,
+            b"abc",
+            0,
+        );
+        let reader = OneByteAtATimeReader {
+            inner: Cursor::new(data),
+        };
+        let logger = test_logger();
+        let mut stream = ProtocolStream::new(reader, true, 1500, &logger);
+
+        let packet = stream
+            .next()
+            .expect("expected a packet")
+            .expect("packet parse should succeed across one-byte reads");
+        assert_eq!(packet.payload, b"abc");
+    }
+
+    #[test]
+    fn stream_continues_after_mtu_exceeded_with_subsequent_valid_packet() {
+        let mut data = encode_packet(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
+            5555,
+            6666,
+            &[0xAAu8; 1500],
+            0,
+        );
+        data.extend(encode_packet(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 3)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 4)),
+            7777,
+            8888,
+            b"ok",
+            0,
+        ));
+
+        let logger = test_logger();
+        let mut stream = ProtocolStream::new(Cursor::new(data), true, 1500, &logger);
+
+        match stream.next() {
+            Some(Err(ProtocolError::MTUExceeded { .. })) => {}
+            other => panic!("expected MTUExceeded, got {other:?}"),
+        }
+
+        let recovered = stream
+            .next()
+            .expect("expected a second packet")
+            .expect("second packet should parse cleanly");
+        assert_eq!(recovered.payload, b"ok");
+        assert_eq!(recovered.src_port, 7777);
+    }
+
+    #[test]
+    fn invalid_magic_terminates_stream_permanently() {
+        let mut data = vec![0xDE, 0xAD, 0xBE];
+        data.extend_from_slice(&[0u8; 32]);
+        let logger = test_logger();
+        let mut stream = ProtocolStream::new(Cursor::new(data), true, 1500, &logger);
+
+        match stream.next() {
+            Some(Err(ProtocolError::InvalidMagic { .. })) => {}
+            other => panic!("expected InvalidMagic, got {other:?}"),
+        }
+        // Subsequent calls must yield None (terminated flag set).
+        assert!(stream.next().is_none(), "stream should be terminated");
+        assert!(stream.next().is_none(), "stream should remain terminated");
+    }
+
+    #[test]
+    fn end_of_stream_after_completed_packet_yields_none() {
+        let data = encode_packet(
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4)),
+            53,
+            53,
+            b"dns",
+            0,
+        );
+        let logger = test_logger();
+        let mut stream = ProtocolStream::new(Cursor::new(data), true, 1500, &logger);
+
+        let pkt = stream.next().expect("first").expect("ok");
+        assert_eq!(pkt.payload, b"dns");
+        assert!(stream.next().is_none());
+        assert!(stream.next().is_none());
+    }
 }

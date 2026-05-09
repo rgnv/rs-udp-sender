@@ -1,10 +1,13 @@
 use std::net::Ipv4Addr;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aes::{Aes128, Aes192, Aes256};
 use cbc::cipher::block_padding::NoPadding;
 use cbc::cipher::{AsyncStreamCipher, BlockEncryptMut, KeyIvInit};
 use des::Des;
+use getrandom::getrandom;
 use hmac::{Hmac, Mac};
 use md5::Md5;
 use rasn::ber;
@@ -54,6 +57,7 @@ pub enum SNMPValue {
 
 #[derive(Debug, Clone)]
 pub struct SNMPV1TrapConfig {
+    pub community: String,
     pub enterprise_oid: String,
     pub agent_addr: Ipv4Addr,
     pub generic_trap: i32,
@@ -83,6 +87,7 @@ pub struct SNMPV3TrapConfig {
     pub trap_oid: String,
     pub timestamp: Option<u32>,
     pub varbinds: Vec<SNMPVarbind>,
+    pub is_inform: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,9 +151,15 @@ pub fn build_snmpv1_trap_pdu(config: SNMPV1TrapConfig) -> Result<Vec<u8>, SnmpEr
         variable_bindings,
     };
 
+    let community = if config.community.is_empty() {
+        DEFAULT_SNMP_COMMUNITY.to_string()
+    } else {
+        config.community
+    };
+
     let message = v1::Message {
         version: v1::Message::<v1::Trap>::VERSION_1.into(),
-        community: DEFAULT_SNMP_COMMUNITY.as_bytes().to_vec().into(),
+        community: community.as_bytes().to_vec().into(),
         data: trap,
     };
 
@@ -213,7 +224,18 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
         .engine_id
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| DEFAULT_SNMP_ENGINE_ID.to_string());
-    let engine_id_bytes = parse_engine_id(&engine_id);
+    let engine_id_bytes = parse_engine_id(&engine_id)?;
+
+    if config.engine_boots > i32::MAX as u32 {
+        return Err(SnmpError::InvalidConfig(
+            "engine_boots exceeds 2^31-1".to_string(),
+        ));
+    }
+    if config.engine_time > i32::MAX as u32 {
+        return Err(SnmpError::InvalidConfig(
+            "engine_time exceeds 2^31-1".to_string(),
+        ));
+    }
 
     let (auth_key, priv_key) = derive_usm_keys(
         &config.auth_protocol,
@@ -245,19 +267,29 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
     let scoped_pdu = v3::ScopedPdu {
         engine_id: engine_id_bytes.clone().into(),
         name: Vec::<u8>::new().into(),
-        data: v2::Pdus::Trap(v2::Trap(v2::Pdu {
-            request_id: request_id(),
-            error_status: v2::Pdu::ERROR_STATUS_NO_ERROR,
-            error_index: 0,
-            variable_bindings,
-        })),
+        data: if config.is_inform {
+            v2::Pdus::InformRequest(v2::InformRequest(v2::Pdu {
+                request_id: request_id(),
+                error_status: v2::Pdu::ERROR_STATUS_NO_ERROR,
+                error_index: 0,
+                variable_bindings,
+            }))
+        } else {
+            v2::Pdus::Trap(v2::Trap(v2::Pdu {
+                request_id: request_id(),
+                error_status: v2::Pdu::ERROR_STATUS_NO_ERROR,
+                error_index: 0,
+                variable_bindings,
+            }))
+        },
     };
 
-    let flags = match (config.auth_protocol, config.priv_protocol) {
+    let base_flags = match (config.auth_protocol, config.priv_protocol) {
         (AuthProtocol::NoAuth, PrivProtocol::NoPriv) => 0x00,
         (_, PrivProtocol::NoPriv) => 0x01,
         _ => 0x03,
     };
+    let flags = base_flags | if config.is_inform { 0x04 } else { 0x00 };
 
     let auth_placeholder_len = auth_parameter_len(&config.auth_protocol);
     let mut auth_placeholder = vec![0u8; auth_placeholder_len];
@@ -376,12 +408,22 @@ fn derive_usm_keys(
     let auth_key = if *auth_protocol == AuthProtocol::NoAuth {
         Vec::new()
     } else {
+        if auth_password.len() < 8 {
+            return Err(SnmpError::InvalidConfig(
+                "auth passphrase must be at least 8 octets (RFC 3414)".to_string(),
+            ));
+        }
         localized_key(*auth_protocol, auth_password.as_bytes(), engine_id)?
     };
 
     let priv_key = if *priv_protocol == PrivProtocol::NoPriv {
         Vec::new()
     } else {
+        if priv_password.len() < 8 {
+            return Err(SnmpError::InvalidConfig(
+                "priv passphrase must be at least 8 octets (RFC 3414)".to_string(),
+            ));
+        }
         derive_priv_key(*auth_protocol, *priv_protocol, priv_password.as_bytes(), engine_id)?
     };
 
@@ -603,10 +645,13 @@ fn encrypt_scoped_pdu(
     engine_time: u32,
     scoped_pdu: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), SnmpError> {
-    let salt64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
+    static SALT_COUNTER: OnceLock<AtomicU64> = OnceLock::new();
+    let counter = SALT_COUNTER.get_or_init(|| {
+        let mut seed = [0u8; 8];
+        let _ = getrandom(&mut seed);
+        AtomicU64::new(u64::from_be_bytes(seed))
+    });
+    let salt64 = counter.fetch_add(1, Ordering::Relaxed);
 
     match priv_protocol {
         PrivProtocol::NoPriv => Ok((scoped_pdu.to_vec(), Vec::new())),
@@ -690,16 +735,24 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-fn parse_engine_id(engine_id: &str) -> Vec<u8> {
-    if let Some(decoded) = decode_hex(engine_id) {
-        return decoded;
+fn parse_engine_id(engine_id: &str) -> Result<Vec<u8>, SnmpError> {
+    let bytes = if let Some(decoded) = decode_hex(engine_id) {
+        decoded
+    } else {
+        engine_id.as_bytes().to_vec()
+    };
+    if bytes.len() < 5 || bytes.len() > 32 {
+        return Err(SnmpError::InvalidConfig(format!(
+            "engine ID must be 5-32 octets per RFC 3411, got {}",
+            bytes.len()
+        )));
     }
-    engine_id.as_bytes().to_vec()
+    Ok(bytes)
 }
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
     let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.len() % 2 != 0 || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if trimmed.is_empty() || !trimmed.len().is_multiple_of(2) || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
 
@@ -890,6 +943,7 @@ mod tests {
             trap_oid: "1.3.6.1.6.3.1.1.5.1".to_string(),
             timestamp: None,
             varbinds: vec![],
+            is_inform: false,
         };
 
         let err = build_snmpv3_trap_pdu(config).expect_err("must fail on empty username");
@@ -910,6 +964,7 @@ mod tests {
             trap_oid: "1.3.6.1.6.3.1.1.5.1".to_string(),
             timestamp: None,
             varbinds: vec![],
+            is_inform: false,
         };
 
         let err = build_snmpv3_trap_pdu(config).expect_err("must fail on priv without auth");
@@ -930,6 +985,7 @@ mod tests {
             trap_oid: String::new(),
             timestamp: None,
             varbinds: vec![],
+            is_inform: false,
         };
 
         let err = build_snmpv3_trap_pdu(config).expect_err("must fail on empty trap_oid");
@@ -938,7 +994,7 @@ mod tests {
 
     #[test]
     fn test_derive_usm_keys_sha_and_aes_lengths() {
-        let engine_id = parse_engine_id("800000020109840301");
+        let engine_id = parse_engine_id("800000020109840301").expect("valid engine ID");
         let (auth_key, priv_key) = derive_usm_keys(
             &AuthProtocol::SHA,
             "authpass123",
@@ -970,9 +1026,250 @@ mod tests {
                 asn_type: SNMPType::OctetString,
                 value: SNMPValue::Str("udp-sender".to_string()),
             }],
+            is_inform: false,
         };
 
         let pdu = build_snmpv3_trap_pdu(config).expect("auth+priv v3 trap should encode");
+        assert!(!pdu.is_empty());
+    }
+
+    #[test]
+    fn test_build_snmpv1_trap_pdu_success() {
+        let config = SNMPV1TrapConfig {
+            community: "public".to_string(),
+            enterprise_oid: "1.3.6.1.4.1.99999".to_string(),
+            agent_addr: std::net::Ipv4Addr::new(127, 0, 0, 1),
+            generic_trap: 6,
+            specific_trap: 1,
+            timestamp: Some(123),
+            varbinds: vec![SNMPVarbind {
+                oid: "1.3.6.1.2.1.1.5.0".to_string(),
+                asn_type: SNMPType::OctetString,
+                value: SNMPValue::Str("udp-sender".to_string()),
+            }],
+        };
+        let pdu = build_snmpv1_trap_pdu(config).expect("v1 trap should encode");
+        assert!(!pdu.is_empty());
+    }
+
+    #[test]
+    fn test_build_snmpv1_trap_pdu_empty_enterprise_oid() {
+        let config = SNMPV1TrapConfig {
+            community: "public".to_string(),
+            enterprise_oid: String::new(),
+            agent_addr: std::net::Ipv4Addr::new(127, 0, 0, 1),
+            generic_trap: 6,
+            specific_trap: 1,
+            timestamp: None,
+            varbinds: vec![],
+        };
+        let err = build_snmpv1_trap_pdu(config).expect_err("must fail on empty enterprise_oid");
+        assert!(matches!(err, SnmpError::MissingField(field) if field == "enterprise_oid"));
+    }
+
+    #[test]
+    fn test_build_snmpv1_trap_pdu_empty_community_uses_default() {
+        // gosnmp parity: empty community defaults to "public".
+        let config = SNMPV1TrapConfig {
+            community: String::new(),
+            enterprise_oid: "1.3.6.1.4.1.99999".to_string(),
+            agent_addr: std::net::Ipv4Addr::new(127, 0, 0, 1),
+            generic_trap: 6,
+            specific_trap: 1,
+            timestamp: Some(0),
+            varbinds: vec![],
+        };
+        let pdu = build_snmpv1_trap_pdu(config).expect("empty community must default to public");
+        assert!(!pdu.is_empty());
+    }
+
+    #[test]
+    fn test_parse_engine_id_valid_hex() {
+        let bytes = parse_engine_id("800000020109840301").expect("valid hex engine ID");
+        assert_eq!(
+            bytes,
+            vec![0x80, 0x00, 0x00, 0x02, 0x01, 0x09, 0x84, 0x03, 0x01]
+        );
+    }
+
+    #[test]
+    fn test_parse_engine_id_plain_ascii_fallback() {
+        // Non-hex strings fall back to raw bytes (must be 5..=32 octets per RFC 3411).
+        let bytes = parse_engine_id("udp-sender").expect("plain ASCII engine ID");
+        assert_eq!(bytes, b"udp-sender".to_vec());
+    }
+
+    #[test]
+    fn test_parse_engine_id_too_short() {
+        // 4 ASCII bytes is below the RFC 3411 minimum of 5.
+        let err = parse_engine_id("abcd").expect_err("must reject <5 octet engine ID");
+        assert!(matches!(err, SnmpError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_parse_engine_id_too_long() {
+        // 33-byte ASCII engine ID exceeds the RFC 3411 maximum of 32.
+        let too_long = "a".repeat(33);
+        let err = parse_engine_id(&too_long).expect_err("must reject >32 octet engine ID");
+        assert!(matches!(err, SnmpError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_decode_hex_variants() {
+        assert_eq!(decode_hex("ab"), Some(vec![0xab]));
+        assert_eq!(decode_hex("DEADBEEF"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(decode_hex(""), None, "empty string must not decode");
+        assert_eq!(decode_hex("abc"), None, "odd length must not decode");
+        assert_eq!(decode_hex("zz"), None, "non-hex must not decode");
+    }
+
+    #[test]
+    fn test_parse_oid_valid_and_invalid() {
+        parse_oid("1.3.6.1.6.3.1.1.5.1").expect("valid OID");
+        let err = parse_oid("").expect_err("empty OID must fail");
+        assert!(matches!(err, SnmpError::InvalidOid(_)));
+        let err = parse_oid("1..2").expect_err("OID with empty arc must fail");
+        assert!(matches!(err, SnmpError::InvalidOid(_)));
+    }
+
+    #[test]
+    fn test_build_snmpv3_short_auth_passphrase() {
+        // RFC 3414 mandates auth/priv passphrases of at least 8 octets.
+        let config = SNMPV3TrapConfig {
+            username: "user".to_string(),
+            engine_id: None,
+            auth_protocol: AuthProtocol::SHA,
+            auth_password: "short".to_string(),
+            priv_protocol: PrivProtocol::NoPriv,
+            priv_password: String::new(),
+            engine_boots: 0,
+            engine_time: 0,
+            trap_oid: "1.3.6.1.6.3.1.1.5.1".to_string(),
+            timestamp: None,
+            varbinds: vec![],
+            is_inform: false,
+        };
+        let err = build_snmpv3_trap_pdu(config).expect_err("must reject <8 octet auth passphrase");
+        assert!(matches!(err, SnmpError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_build_snmpv3_short_priv_passphrase() {
+        let config = SNMPV3TrapConfig {
+            username: "user".to_string(),
+            engine_id: None,
+            auth_protocol: AuthProtocol::SHA,
+            auth_password: "authpass123".to_string(),
+            priv_protocol: PrivProtocol::AES,
+            priv_password: "tiny".to_string(),
+            engine_boots: 0,
+            engine_time: 0,
+            trap_oid: "1.3.6.1.6.3.1.1.5.1".to_string(),
+            timestamp: None,
+            varbinds: vec![],
+            is_inform: false,
+        };
+        let err = build_snmpv3_trap_pdu(config).expect_err("must reject <8 octet priv passphrase");
+        assert!(matches!(err, SnmpError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_build_snmpv3_engine_boots_overflow() {
+        let config = SNMPV3TrapConfig {
+            username: "user".to_string(),
+            engine_id: None,
+            auth_protocol: AuthProtocol::NoAuth,
+            auth_password: String::new(),
+            priv_protocol: PrivProtocol::NoPriv,
+            priv_password: String::new(),
+            engine_boots: u32::MAX,
+            engine_time: 0,
+            trap_oid: "1.3.6.1.6.3.1.1.5.1".to_string(),
+            timestamp: None,
+            varbinds: vec![],
+            is_inform: false,
+        };
+        let err = build_snmpv3_trap_pdu(config).expect_err("must reject engine_boots > 2^31-1");
+        assert!(matches!(err, SnmpError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_build_snmpv3_engine_time_overflow() {
+        let config = SNMPV3TrapConfig {
+            username: "user".to_string(),
+            engine_id: None,
+            auth_protocol: AuthProtocol::NoAuth,
+            auth_password: String::new(),
+            priv_protocol: PrivProtocol::NoPriv,
+            priv_password: String::new(),
+            engine_boots: 0,
+            engine_time: u32::MAX,
+            trap_oid: "1.3.6.1.6.3.1.1.5.1".to_string(),
+            timestamp: None,
+            varbinds: vec![],
+            is_inform: false,
+        };
+        let err = build_snmpv3_trap_pdu(config).expect_err("must reject engine_time > 2^31-1");
+        assert!(matches!(err, SnmpError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_hash_password_1mb_md5_and_sha1_lengths() {
+        let md5 = hash_password_1mb(AuthProtocol::MD5, b"authpass123").expect("MD5 hash");
+        assert_eq!(md5.len(), 16, "MD5 digest must be 16 bytes");
+        let sha1 = hash_password_1mb(AuthProtocol::SHA, b"authpass123").expect("SHA-1 hash");
+        assert_eq!(sha1.len(), 20, "SHA-1 digest must be 20 bytes");
+    }
+
+    #[test]
+    fn test_hash_bytes_noauth_rejected() {
+        let err = hash_bytes(AuthProtocol::NoAuth, b"data").expect_err("NoAuth has no hash fn");
+        assert!(matches!(err, SnmpError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_auth_parameter_len_per_protocol() {
+        // RFC 7860 / RFC 3414 truncation lengths.
+        assert_eq!(auth_parameter_len(&AuthProtocol::NoAuth), 0);
+        assert_eq!(auth_parameter_len(&AuthProtocol::MD5), 12);
+        assert_eq!(auth_parameter_len(&AuthProtocol::SHA), 12);
+        assert_eq!(auth_parameter_len(&AuthProtocol::SHA224), 16);
+        assert_eq!(auth_parameter_len(&AuthProtocol::SHA256), 24);
+        assert_eq!(auth_parameter_len(&AuthProtocol::SHA384), 32);
+        assert_eq!(auth_parameter_len(&AuthProtocol::SHA512), 48);
+    }
+
+    #[test]
+    fn test_build_snmpv3_inform_succeeds() {
+        // INFORM PDU sets the Reportable flag (0x04). End-to-end encode check.
+        let config = SNMPV3TrapConfig {
+            username: "user".to_string(),
+            engine_id: None,
+            auth_protocol: AuthProtocol::SHA,
+            auth_password: "authpass123".to_string(),
+            priv_protocol: PrivProtocol::AES,
+            priv_password: "privpass123".to_string(),
+            engine_boots: 1,
+            engine_time: 100,
+            trap_oid: "1.3.6.1.6.3.1.1.5.1".to_string(),
+            timestamp: Some(123),
+            varbinds: vec![],
+            is_inform: true,
+        };
+        let pdu = build_snmpv3_trap_pdu(config).expect("v3 INFORM must encode");
+        assert!(!pdu.is_empty());
+    }
+
+    #[test]
+    fn test_build_snmpv2c_empty_community_accepted() {
+        // v2c does not enforce a non-empty community (unlike v1 which defaults to "public").
+        let config = SNMPV2cTrapConfig {
+            community: String::new(),
+            trap_oid: "1.3.6.1.6.3.1.1.5.1".to_string(),
+            timestamp: Some(0),
+            varbinds: vec![],
+        };
+        let pdu = build_snmpv2c_trap_pdu(config).expect("v2c with empty community must encode");
         assert!(!pdu.is_empty());
     }
 }

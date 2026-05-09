@@ -275,4 +275,115 @@ mod tests {
 
         assert_eq!(out[3], FLAG_IPV6);
     }
+
+    #[test]
+    fn parse_ip_accepts_v4_and_v6() {
+        assert_eq!(
+            parse_ip("10.0.0.1").unwrap(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        );
+        assert_eq!(
+            parse_ip("::1").unwrap(),
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        );
+        assert_eq!(
+            parse_ip("2001:db8::1").unwrap(),
+            IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap())
+        );
+    }
+
+    #[test]
+    fn parse_ip_rejects_garbage() {
+        let err = parse_ip("not.an.ip").unwrap_err();
+        assert!(err.starts_with("Invalid IP address:"));
+        assert!(err.contains("not.an.ip"));
+
+        let err = parse_ip("").unwrap_err();
+        assert!(err.starts_with("Invalid IP address:"));
+
+        let err = parse_ip("999.999.999.999").unwrap_err();
+        assert!(err.starts_with("Invalid IP address:"));
+    }
+
+    // Verifies the full IPv4 frame byte layout matches the binary protocol exactly:
+    // MAGIC(3) + flags(1) + src_ip(4) + dest_ip(4) + src_port(2 BE) + dest_port(2 BE)
+    // + payload_len(2 BE) + payload — must remain stable for Go interop.
+    #[test]
+    fn full_ipv4_frame_layout_is_exact() {
+        let mut out = Vec::new();
+        write_packet(
+            &mut out,
+            0,
+            &Ipv4Addr::new(10, 0, 0, 1).octets(),
+            &Ipv4Addr::new(192, 168, 1, 100).octets(),
+            5000,
+            514,
+            b"hi",
+        )
+        .expect("packet write succeeds");
+
+        // MAGIC + flags + 4 + 4 + 2 + 2 + 2 + 2 = 20 bytes
+        assert_eq!(out.len(), 3 + 1 + 4 + 4 + 2 + 2 + 2 + 2);
+        assert_eq!(&out[0..3], &MAGIC_BYTES);
+        assert_eq!(out[3], 0);
+        assert_eq!(&out[4..8], &[10, 0, 0, 1]);
+        assert_eq!(&out[8..12], &[192, 168, 1, 100]);
+        // src_port=5000 → 0x1388 BE
+        assert_eq!(&out[12..14], &[0x13, 0x88]);
+        // dest_port=514 → 0x0202 BE
+        assert_eq!(&out[14..16], &[0x02, 0x02]);
+        // payload_len=2 → 0x0002 BE
+        assert_eq!(&out[16..18], &[0x00, 0x02]);
+        assert_eq!(&out[18..20], b"hi");
+    }
+
+    // Verifies the full IPv6 frame byte layout: src/dest are 16 bytes each.
+    #[test]
+    fn full_ipv6_frame_layout_is_exact() {
+        let mut out = Vec::new();
+        let src = "2001:db8::1".parse::<Ipv6Addr>().unwrap();
+        let dst = "2001:db8::100".parse::<Ipv6Addr>().unwrap();
+        write_packet(
+            &mut out,
+            FLAG_IPV6,
+            &src.octets(),
+            &dst.octets(),
+            8080,
+            1234,
+            b"x",
+        )
+        .expect("packet write succeeds");
+
+        // MAGIC + flags + 16 + 16 + 2 + 2 + 2 + 1 = 42 bytes
+        assert_eq!(out.len(), 3 + 1 + 16 + 16 + 2 + 2 + 2 + 1);
+        assert_eq!(&out[0..3], &MAGIC_BYTES);
+        assert_eq!(out[3], FLAG_IPV6);
+        assert_eq!(&out[4..20], &src.octets());
+        assert_eq!(&out[20..36], &dst.octets());
+        // src_port=8080 → 0x1F90
+        assert_eq!(&out[36..38], &[0x1F, 0x90]);
+        // dest_port=1234 → 0x04D2
+        assert_eq!(&out[38..40], &[0x04, 0xD2]);
+        // payload_len=1
+        assert_eq!(&out[40..42], &[0x00, 0x01]);
+    }
+
+    // u16 payload-length cap: anything larger than u16::MAX must be rejected,
+    // matching Go reference behaviour.
+    #[test]
+    fn payload_too_large_is_rejected() {
+        let oversized = vec![0u8; usize::from(u16::MAX) + 1];
+        let mut out = Vec::new();
+        let err = write_packet(
+            &mut out,
+            0,
+            &Ipv4Addr::new(1, 1, 1, 1).octets(),
+            &Ipv4Addr::new(2, 2, 2, 2).octets(),
+            1,
+            2,
+            &oversized,
+        )
+        .unwrap_err();
+        assert_eq!(err, "payload too large");
+    }
 }

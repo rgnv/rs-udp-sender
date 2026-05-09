@@ -1,0 +1,22 @@
+rs-udp-sender perf bench
+PKT_COUNT=10000000 PAYLOAD_BYTES=1400 DEST=192.0.2.99:5000
+WARMUP=3 RUNS=5
+
+=== rust ===
+wall-mean=44.860900093599994s stddev=2.5941836355524255s min=41.1383990222s max=47.8683182012s
+	Maximum resident set size (kbytes): 3156
+   164,943,228,967      cpu_atom/instructions/           #    0.78  insn per cycle              (0.00%)
+   334,328,551,481      cpu_core/instructions/           #    1.69  insn per cycle              (100.00%)
+   211,548,945,516      cpu_atom/cycles/                                                        (0.00%)
+   197,875,807,675      cpu_core/cycles/                                                        (100.00%)
+         1,716,704      context-switches                                                      
+
+=== go ===
+wall-mean=66.27885704698s stddev=2.502496224038563s min=62.855177958780004s max=68.52272866378s
+	Maximum resident set size (kbytes): 10228
+   196,282,017,892      cpu_atom/instructions/           #    0.82  insn per cycle              (0.00%)
+   608,500,472,766      cpu_core/instructions/           #    1.84  insn per cycle              (100.00%)
+   239,904,318,720      cpu_atom/cycles/                                                        (0.00%)
+   330,283,749,917      cpu_core/cycles/                                                        (100.00%)
+         3,246,077      context-switches                                                      
+

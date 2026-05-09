@@ -53,10 +53,10 @@ Examples:
 )]
 struct Cli {
     #[arg(short = 'h', long = "help", action = ArgAction::Help, help = "Show this help message")]
-    _help: bool,
+    _help: Option<bool>,
 
     #[arg(short = 'V', long = "version", action = ArgAction::Version, help = "Print version and exit")]
-    _version: bool,
+    _version: Option<bool>,
 
     #[arg(short = 'v', long = "verbose", action = ArgAction::SetTrue, help = "Enable verbose logging (debug level)")]
     verbose: bool,
@@ -163,4 +163,178 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn parse_mtu_accepts_default() {
+        assert_eq!(parse_mtu("1500").unwrap(), 1500);
+    }
+
+    #[test]
+    fn parse_mtu_accepts_min() {
+        assert_eq!(parse_mtu("576").unwrap(), MIN_MTU);
+    }
+
+    #[test]
+    fn parse_mtu_accepts_max() {
+        assert_eq!(parse_mtu("9000").unwrap(), MAX_MTU);
+    }
+
+    #[test]
+    fn parse_mtu_rejects_below_min() {
+        let err = parse_mtu("575").unwrap_err();
+        assert!(err.contains("MTU must be between"));
+        assert!(err.contains("575"));
+    }
+
+    #[test]
+    fn parse_mtu_rejects_above_max() {
+        let err = parse_mtu("9001").unwrap_err();
+        assert!(err.contains("MTU must be between"));
+        assert!(err.contains("9001"));
+    }
+
+    #[test]
+    fn parse_mtu_rejects_zero() {
+        assert!(parse_mtu("0").is_err());
+    }
+
+    #[test]
+    fn parse_mtu_rejects_non_numeric() {
+        assert!(parse_mtu("abc").is_err());
+    }
+
+    #[test]
+    fn parse_mtu_rejects_negative() {
+        assert!(parse_mtu("-1").is_err());
+    }
+
+    #[test]
+    fn parse_mtu_rejects_empty() {
+        assert!(parse_mtu("").is_err());
+    }
+
+    #[test]
+    fn is_unexpected_eof_true_for_unexpected_eof_variant() {
+        assert!(is_unexpected_eof(&ProtocolError::UnexpectedEOF));
+    }
+
+    #[test]
+    fn is_unexpected_eof_true_for_read_magic_eof() {
+        let err = ProtocolError::ReadMagic {
+            read: 0,
+            source: Error::from(ErrorKind::UnexpectedEof),
+        };
+        assert!(is_unexpected_eof(&err));
+    }
+
+    #[test]
+    fn is_unexpected_eof_true_for_read_field_eof() {
+        let err = ProtocolError::ReadField {
+            field: "src_ip",
+            source: Error::from(ErrorKind::UnexpectedEof),
+        };
+        assert!(is_unexpected_eof(&err));
+    }
+
+    #[test]
+    fn is_unexpected_eof_true_for_read_payload_eof() {
+        let err = ProtocolError::ReadPayload {
+            payload_len: 32,
+            source: Error::from(ErrorKind::UnexpectedEof),
+        };
+        assert!(is_unexpected_eof(&err));
+    }
+
+    #[test]
+    fn is_unexpected_eof_true_for_read_error_eof() {
+        let err = ProtocolError::ReadError(Error::from(ErrorKind::UnexpectedEof));
+        assert!(is_unexpected_eof(&err));
+    }
+
+    #[test]
+    fn is_unexpected_eof_false_for_other_io_kind() {
+        let err = ProtocolError::ReadError(Error::from(ErrorKind::ConnectionReset));
+        assert!(!is_unexpected_eof(&err));
+    }
+
+    #[test]
+    fn is_unexpected_eof_false_for_invalid_magic() {
+        let err = ProtocolError::InvalidMagic {
+            got0: 0x00,
+            got1: 0x00,
+            got2: 0x00,
+            exp0: 0xC1,
+            exp1: 0x21,
+            exp2: 0xB1,
+        };
+        assert!(!is_unexpected_eof(&err));
+    }
+
+    #[test]
+    fn is_unexpected_eof_false_for_mtu_exceeded() {
+        let err = ProtocolError::MTUExceeded {
+            packet_number: 1,
+            packet_size: 9029,
+            mtu: 1500,
+            payload_size: 9001,
+            source_ip: "10.0.0.1".parse().unwrap(),
+            source_port: 5000,
+            dest_ip: "192.168.1.100".parse().unwrap(),
+            dest_port: 514,
+        };
+        assert!(!is_unexpected_eof(&err));
+    }
+
+    #[test]
+    fn is_unexpected_eof_false_for_ipv6_unavailable() {
+        let err = ProtocolError::IPv6NotAvailable;
+        assert!(!is_unexpected_eof(&err));
+    }
+
+    #[test]
+    fn cli_parses_defaults() {
+        let cli = Cli::try_parse_from(["udp-sender"]).unwrap();
+        assert_eq!(cli.mtu, DEFAULT_MTU);
+        assert!(!cli.verbose);
+    }
+
+    #[test]
+    fn cli_verbose_short_flag() {
+        let cli = Cli::try_parse_from(["udp-sender", "-v"]).unwrap();
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn cli_verbose_long_flag() {
+        let cli = Cli::try_parse_from(["udp-sender", "--verbose"]).unwrap();
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn cli_mtu_short_flag() {
+        let cli = Cli::try_parse_from(["udp-sender", "-m", "9000"]).unwrap();
+        assert_eq!(cli.mtu, 9000);
+    }
+
+    #[test]
+    fn cli_mtu_long_flag() {
+        let cli = Cli::try_parse_from(["udp-sender", "--mtu", "1280"]).unwrap();
+        assert_eq!(cli.mtu, 1280);
+    }
+
+    #[test]
+    fn cli_rejects_invalid_mtu() {
+        assert!(Cli::try_parse_from(["udp-sender", "--mtu", "100"]).is_err());
+    }
+
+    #[test]
+    fn cli_rejects_unknown_flag() {
+        assert!(Cli::try_parse_from(["udp-sender", "--bogus"]).is_err());
+    }
 }

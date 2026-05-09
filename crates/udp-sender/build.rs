@@ -1,3 +1,5 @@
 fn main() {
-    shadow_rs::new().expect("shadow_rs build info");
+    shadow_rs::ShadowBuilder::builder()
+        .build()
+        .expect("shadow_rs build info");
 }

@@ -36,11 +36,15 @@ rs-udp-snmp-trap-generator -> [binary protocol stdout] -> rs-udp-sender -> [raw 
 
 ### SNMPv3
 
-- Basic message/PDU structure supported
-- NoAuth/NoPriv works
-- Auth/Priv key derivation is not fully implemented
-- Auth or priv combinations currently return:
-  - `KeyInitFailed("v3 key derivation not yet fully implemented — requires manual AES/DES key gen")`
+- Full USM (User-based Security Model) parity with gosnmp v1.43.2
+- All security levels functional: NoAuthNoPriv, AuthNoPriv, AuthPriv
+- Auth protocols: MD5, SHA (SHA-1), SHA-224, SHA-256, SHA-384, SHA-512
+- Priv protocols: DES, AES (AES-128 CFB), AES-192, AES-256, AES-192C, AES-256C
+- INFORM PDU supported via `--is-inform` (sets Reportable flag 0x04, no response handling)
+- RFC 3414 §A.2 password-to-key with 1 MiB stretch + engine-ID localization
+- Engine ID validated to RFC 3411 bounds (5–32 octets); passphrase ≥ 8 octets
+- `engine_boots` and `engine_time` validated to u31 bounds (≤ 2³¹−1)
+- Default Engine ID: `800000020109840301` (hex)
 
 ## Supported SNMPv3 Auth Protocol Enum Values
 
@@ -54,11 +58,14 @@ The Rust implementation exposes these auth protocol variants:
 - `SHA384`
 - `SHA512`
 
-CLI mapping currently accepts and maps at least:
+CLI mapping accepts (case-insensitive):
 
 - `MD5`
-- `SHA`
+- `SHA` (alias: `SHA1`)
+- `SHA224`
 - `SHA256`
+- `SHA384`
+- `SHA512`
 - empty value => `NoAuth`
 
 ## Supported SNMPv3 Privacy Protocol Enum Values
@@ -73,10 +80,14 @@ The Rust implementation exposes these privacy protocol variants:
 - `AES192C`
 - `AES256C`
 
-CLI mapping currently accepts and maps at least:
+CLI mapping accepts (case-insensitive):
 
 - `DES`
-- `AES`
+- `AES` (alias: `AES128`)
+- `AES192`
+- `AES256`
+- `AES192C` (Cisco-style key extension)
+- `AES256C` (Cisco-style key extension)
 - empty value => `NoPriv`
 
 ## Examples
@@ -91,11 +102,16 @@ rs-udp-snmp-trap-generator --version 1 --count 50 \
   --dest-ip 192.168.1.100 --dest-port 162 \
   --enterprise 1.3.6.1.4.1.99999 | sudo rs-udp-sender
 
-# v3 trap generation attempt (auth/priv currently returns KeyInitFailed)
+# v3 AuthPriv trap (SHA-256 auth + AES-128 priv)
 rs-udp-snmp-trap-generator --version 3 --count 10 \
   --dest-ip 192.168.1.100 --dest-port 162 \
-  --security-name myuser --auth-proto SHA --auth-pass "myauthpass123456" \
+  --security-name myuser --auth-proto SHA256 --auth-pass "myauthpass123456" \
   --priv-proto AES --priv-pass "myprivpass123456" | sudo rs-udp-sender
+
+# v3 INFORM (Reportable flag set, sender does not consume responses)
+rs-udp-snmp-trap-generator --version 3 --count 10 --is-inform \
+  --dest-ip 192.168.1.100 --dest-port 162 \
+  --security-name myuser --auth-proto SHA --auth-pass "myauthpass123456" | sudo rs-udp-sender
 
 # spoofed source identities
 rs-udp-snmp-trap-generator --version 2c --count 50 \
@@ -132,6 +148,7 @@ Options:
   --auth-pass <string>       SNMPv3 auth passphrase
   --priv-proto <string>      SNMPv3 privacy protocol
   --priv-pass <string>       SNMPv3 privacy passphrase
+  --is-inform                Emit InformRequest PDU instead of Trap (sets Reportable flag)
   --ipv6                     Generate IPv6 packets
   --message <string>         Message in sysDescr varbind
 ```

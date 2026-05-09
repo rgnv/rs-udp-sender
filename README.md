@@ -101,7 +101,7 @@ rs-udp-snmp-trap-generator --version 2c --count 100 --dest-ip 192.168.1.100 --de
   sudo rs-udp-sender
 ```
 
-### 5) SNMP v3 traps (basic support)
+### 5) SNMP v3 traps
 
 ```bash
 rs-udp-snmp-trap-generator --version 3 --count 10 --dest-ip 192.168.1.100 --dest-port 162 \
@@ -110,7 +110,7 @@ rs-udp-snmp-trap-generator --version 3 --count 10 --dest-ip 192.168.1.100 --dest
   sudo rs-udp-sender
 ```
 
-Note: v3 auth/priv key derivation is not fully implemented yet; auth/priv combinations currently return `KeyInitFailed`.
+Full SNMPv3 USM parity with gosnmp v1.43.2: auth (MD5/SHA/SHA224/SHA256/SHA384/SHA512), priv (DES/AES/AES192/AES256 + Cisco-C variants), and INFORM PDUs (`--is-inform`). See [SNMP.md](./SNMP.md) for the full matrix.
 
 ## CLI Reference
 
@@ -162,6 +162,7 @@ Options:
   --auth-pass <pass>         SNMPv3 auth passphrase
   --priv-proto <proto>       SNMPv3 privacy protocol
   --priv-pass <pass>         SNMPv3 privacy passphrase
+  --is-inform                Emit InformRequest PDU instead of Trap (sets Reportable flag)
   --ipv6                     Generate IPv6 packets
   --message <text>           Message in sysDescr varbind
   -h, --help                 Show help
@@ -169,20 +170,18 @@ Options:
 
 ## Performance
 
-Benchmarks run on 10M packets (1400B payload each, ~13GB total payload).
+End-to-end pipeline benchmark (generator + parser + raw-socket sender) against the Go reference on identical hardware/kernel/workload — 10M packets × 1400 B payload, 0 drops on both.
 
-### Generator Throughput (Linux, single thread)
-| Generator | Time | Throughput | Memory |
-|-----------|------|-----------|--------|
-| Go packet-generator | 20.09s | ~650 MB/s | 9.4 MB |
-| Rust packet-generator | 3.58s | ~3.64 GB/s | 2.5 MB |
+| Metric | Rust | Go | Rust / Go |
+|---|---:|---:|---:|
+| Wall mean | **44.86 s** | 66.28 s | **0.677×** |
+| Throughput | **222,975 pkts/s** (314 MB/s) | 150,876 pkts/s (212 MB/s) | **1.478×** |
+| Max RSS | **3,156 KB** | 10,228 KB | **0.309×** |
+| Instructions retired | **334.3 B** | 608.5 B | **0.549×** |
+| Cycles | **197.9 B** | 330.3 B | **0.599×** |
+| Context switches | **1,716,704** | 3,246,077 | **0.529×** |
 
-The Rust generator is **5.6x faster** and uses **3.7x less memory**.
-
-### Sender Pipeline (generate + parse + build + raw socket send)
-Both senders are bottlenecked by raw socket throughput, not CPU. 
-The Rust sender has lower base overhead (~1.2 MB vs ~3.5 MB binary size).
-Pipeline throughput for both is dominated by generator speed.
+**1.48× faster wall-clock**, **3.24× lower RSS**, **45% fewer instructions retired**. See [PERF.md](./PERF.md) for the full setup, profiler output, and reproduction steps.
 
 ## Protocol and Design Docs
 

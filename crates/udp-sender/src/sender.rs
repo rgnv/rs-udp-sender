@@ -299,7 +299,7 @@ mod tests {
             );
 
             match result {
-                Err(SenderError::SendError(e)) if e == nix::errno::Errno::EAFNOSUPPORT => {}
+                Err(SenderError::SendError(nix::errno::Errno::EAFNOSUPPORT)) => {}
                 other => panic!("expected EAFNOSUPPORT, got: {other:?}"),
             }
         }
@@ -338,7 +338,7 @@ mod tests {
 
         match result {
             Ok(sent) => assert!(sent > 0),
-            Err(SenderError::SendError(e)) if e == nix::errno::Errno::ENETUNREACH => {}
+            Err(SenderError::SendError(nix::errno::Errno::ENETUNREACH)) => {}
             Err(e) => panic!("unexpected error: {e}"),
         }
 
@@ -360,7 +360,7 @@ mod tests {
         );
 
         match result {
-            Err(SenderError::SendError(e)) if e == nix::errno::Errno::EINVAL => {}
+            Err(SenderError::SendError(nix::errno::Errno::EINVAL)) => {}
             other => panic!("expected EINVAL for v4/v6 mismatch, got: {other:?}"),
         }
 

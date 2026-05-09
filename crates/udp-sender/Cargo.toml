@@ -35,6 +35,7 @@ des = "0.8"
 cfb-mode = "0.8"
 cipher = "0.4"
 cbc = "0.1"
+getrandom = "0.2"
 
 [build-dependencies]
 shadow-rs.workspace = true

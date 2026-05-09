@@ -340,7 +340,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: rgnv/homebrew-rs-udp-sender
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Download release artifacts and compute SHA256
         run: |
