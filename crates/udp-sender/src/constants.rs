@@ -82,7 +82,10 @@ mod tests {
 
     #[test]
     fn test_mtu_bounds() {
-        const _: () = assert!(MIN_MTU >= 68, "min MTU must be at least 68 bytes (IPv4 minimum)");
+        const _: () = assert!(
+            MIN_MTU >= 68,
+            "min MTU must be at least 68 bytes (IPv4 minimum)"
+        );
         const _: () = assert!(MAX_MTU >= DEFAULT_MTU);
     }
 }

@@ -190,7 +190,9 @@ fn run() -> Result<(), String> {
     let mut stdout = io::stdout().lock();
     for i in 0..args.count {
         let src_ip = increment_ip(base_ip_addr, i);
-        let src_port = args.base_port.wrapping_add(u16::try_from(i & 0xFFFF).unwrap_or(0));
+        let src_port = args
+            .base_port
+            .wrapping_add(u16::try_from(i & 0xFFFF).unwrap_or(0));
         let pdu_bytes = build_pdu(&args, version, src_ip, i)
             .map_err(|e| format!("Error encoding SNMP trap {}: {e}", i + 1))?;
 
@@ -414,11 +416,26 @@ mod tests {
 
     #[test]
     fn parse_auth_proto_accepts_known() {
-        assert!(matches!(parse_auth_proto("").unwrap(), AuthProtocol::NoAuth));
-        assert!(matches!(parse_auth_proto("md5").unwrap(), AuthProtocol::MD5));
-        assert!(matches!(parse_auth_proto("SHA1").unwrap(), AuthProtocol::SHA));
-        assert!(matches!(parse_auth_proto("sha256").unwrap(), AuthProtocol::SHA256));
-        assert!(matches!(parse_auth_proto("SHA512").unwrap(), AuthProtocol::SHA512));
+        assert!(matches!(
+            parse_auth_proto("").unwrap(),
+            AuthProtocol::NoAuth
+        ));
+        assert!(matches!(
+            parse_auth_proto("md5").unwrap(),
+            AuthProtocol::MD5
+        ));
+        assert!(matches!(
+            parse_auth_proto("SHA1").unwrap(),
+            AuthProtocol::SHA
+        ));
+        assert!(matches!(
+            parse_auth_proto("sha256").unwrap(),
+            AuthProtocol::SHA256
+        ));
+        assert!(matches!(
+            parse_auth_proto("SHA512").unwrap(),
+            AuthProtocol::SHA512
+        ));
     }
 
     #[test]
@@ -430,11 +447,26 @@ mod tests {
 
     #[test]
     fn parse_priv_proto_accepts_known() {
-        assert!(matches!(parse_priv_proto("").unwrap(), PrivProtocol::NoPriv));
-        assert!(matches!(parse_priv_proto("des").unwrap(), PrivProtocol::DES));
-        assert!(matches!(parse_priv_proto("AES").unwrap(), PrivProtocol::AES));
-        assert!(matches!(parse_priv_proto("AES128").unwrap(), PrivProtocol::AES));
-        assert!(matches!(parse_priv_proto("aes256").unwrap(), PrivProtocol::AES256));
+        assert!(matches!(
+            parse_priv_proto("").unwrap(),
+            PrivProtocol::NoPriv
+        ));
+        assert!(matches!(
+            parse_priv_proto("des").unwrap(),
+            PrivProtocol::DES
+        ));
+        assert!(matches!(
+            parse_priv_proto("AES").unwrap(),
+            PrivProtocol::AES
+        ));
+        assert!(matches!(
+            parse_priv_proto("AES128").unwrap(),
+            PrivProtocol::AES
+        ));
+        assert!(matches!(
+            parse_priv_proto("aes256").unwrap(),
+            PrivProtocol::AES256
+        ));
     }
 
     #[test]
@@ -446,21 +478,54 @@ mod tests {
 
     #[test]
     fn parse_auth_proto_covers_all_variants() {
-        assert!(matches!(parse_auth_proto("NoAuth").unwrap(), AuthProtocol::NoAuth));
-        assert!(matches!(parse_auth_proto("none").unwrap(), AuthProtocol::NoAuth));
-        assert!(matches!(parse_auth_proto("MD5").unwrap(), AuthProtocol::MD5));
-        assert!(matches!(parse_auth_proto("sha").unwrap(), AuthProtocol::SHA));
-        assert!(matches!(parse_auth_proto("SHA224").unwrap(), AuthProtocol::SHA224));
-        assert!(matches!(parse_auth_proto("sha384").unwrap(), AuthProtocol::SHA384));
+        assert!(matches!(
+            parse_auth_proto("NoAuth").unwrap(),
+            AuthProtocol::NoAuth
+        ));
+        assert!(matches!(
+            parse_auth_proto("none").unwrap(),
+            AuthProtocol::NoAuth
+        ));
+        assert!(matches!(
+            parse_auth_proto("MD5").unwrap(),
+            AuthProtocol::MD5
+        ));
+        assert!(matches!(
+            parse_auth_proto("sha").unwrap(),
+            AuthProtocol::SHA
+        ));
+        assert!(matches!(
+            parse_auth_proto("SHA224").unwrap(),
+            AuthProtocol::SHA224
+        ));
+        assert!(matches!(
+            parse_auth_proto("sha384").unwrap(),
+            AuthProtocol::SHA384
+        ));
     }
 
     #[test]
     fn parse_priv_proto_covers_all_variants() {
-        assert!(matches!(parse_priv_proto("NoPriv").unwrap(), PrivProtocol::NoPriv));
-        assert!(matches!(parse_priv_proto("none").unwrap(), PrivProtocol::NoPriv));
-        assert!(matches!(parse_priv_proto("aes192").unwrap(), PrivProtocol::AES192));
-        assert!(matches!(parse_priv_proto("AES192C").unwrap(), PrivProtocol::AES192C));
-        assert!(matches!(parse_priv_proto("aes256c").unwrap(), PrivProtocol::AES256C));
+        assert!(matches!(
+            parse_priv_proto("NoPriv").unwrap(),
+            PrivProtocol::NoPriv
+        ));
+        assert!(matches!(
+            parse_priv_proto("none").unwrap(),
+            PrivProtocol::NoPriv
+        ));
+        assert!(matches!(
+            parse_priv_proto("aes192").unwrap(),
+            PrivProtocol::AES192
+        ));
+        assert!(matches!(
+            parse_priv_proto("AES192C").unwrap(),
+            PrivProtocol::AES192C
+        ));
+        assert!(matches!(
+            parse_priv_proto("aes256c").unwrap(),
+            PrivProtocol::AES256C
+        ));
     }
 
     #[test]
@@ -470,7 +535,10 @@ mod tests {
         assert!(matches!(normalize_version("V1").unwrap(), SNMPVersion::V1));
         assert!(matches!(normalize_version("2").unwrap(), SNMPVersion::V2c));
         assert!(matches!(normalize_version("2c").unwrap(), SNMPVersion::V2c));
-        assert!(matches!(normalize_version("V2c").unwrap(), SNMPVersion::V2c));
+        assert!(matches!(
+            normalize_version("V2c").unwrap(),
+            SNMPVersion::V2c
+        ));
         assert!(matches!(normalize_version("3").unwrap(), SNMPVersion::V3));
         assert!(matches!(normalize_version("v3").unwrap(), SNMPVersion::V3));
     }
@@ -488,10 +556,19 @@ mod tests {
     #[test]
     fn increment_ip_v4_increments_last_octet() {
         let base = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        assert_eq!(increment_ip(base, 0), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
-        assert_eq!(increment_ip(base, 5), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6)));
+        assert_eq!(
+            increment_ip(base, 0),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        );
+        assert_eq!(
+            increment_ip(base, 5),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6))
+        );
         // wrapping_add: 1 + 255 = 0
-        assert_eq!(increment_ip(base, 255), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)));
+        assert_eq!(
+            increment_ip(base, 255),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0))
+        );
     }
 
     #[test]

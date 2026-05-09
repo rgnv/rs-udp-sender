@@ -176,7 +176,10 @@ mod tests {
     fn test_json_passes_through_del_and_high_unicode() {
         // 0x7f (DEL) and chars >= 0x20 pass through unescaped (UTF-8 safe).
         let s = render(LogLevel::Info, "a\x7fb\u{00e9}c\u{1f600}", &[]);
-        assert_eq!(s, "{\"level\":\"info\",\"message\":\"a\x7fb\u{00e9}c\u{1f600}\"}");
+        assert_eq!(
+            s,
+            "{\"level\":\"info\",\"message\":\"a\x7fb\u{00e9}c\u{1f600}\"}"
+        );
     }
 
     #[test]
@@ -217,15 +220,25 @@ mod tests {
     #[test]
     fn test_all_level_string_representations() {
         // Sanity-check the lowercase emission for every variant.
-        assert_eq!(render(LogLevel::Debug, "x", &[]),
-            r#"{"level":"debug","message":"x"}"#);
-        assert_eq!(render(LogLevel::Info, "x", &[]),
-            r#"{"level":"info","message":"x"}"#);
-        assert_eq!(render(LogLevel::Warn, "x", &[]),
-            r#"{"level":"warn","message":"x"}"#);
-        assert_eq!(render(LogLevel::Error, "x", &[]),
-            r#"{"level":"error","message":"x"}"#);
-        assert_eq!(render(LogLevel::Fatal, "x", &[]),
-            r#"{"level":"fatal","message":"x"}"#);
+        assert_eq!(
+            render(LogLevel::Debug, "x", &[]),
+            r#"{"level":"debug","message":"x"}"#
+        );
+        assert_eq!(
+            render(LogLevel::Info, "x", &[]),
+            r#"{"level":"info","message":"x"}"#
+        );
+        assert_eq!(
+            render(LogLevel::Warn, "x", &[]),
+            r#"{"level":"warn","message":"x"}"#
+        );
+        assert_eq!(
+            render(LogLevel::Error, "x", &[]),
+            r#"{"level":"error","message":"x"}"#
+        );
+        assert_eq!(
+            render(LogLevel::Fatal, "x", &[]),
+            r#"{"level":"fatal","message":"x"}"#
+        );
     }
 }

@@ -282,10 +282,7 @@ mod tests {
             parse_ip("10.0.0.1").unwrap(),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
         );
-        assert_eq!(
-            parse_ip("::1").unwrap(),
-            IpAddr::V6(Ipv6Addr::LOCALHOST)
-        );
+        assert_eq!(parse_ip("::1").unwrap(), IpAddr::V6(Ipv6Addr::LOCALHOST));
         assert_eq!(
             parse_ip("2001:db8::1").unwrap(),
             IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap())

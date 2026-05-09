@@ -297,8 +297,8 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
     let scoped_data = if config.priv_protocol == PrivProtocol::NoPriv {
         v3::ScopedPduData::CleartextPdu(scoped_pdu)
     } else {
-        let scoped_pdu_bytes = ber::encode(&scoped_pdu)
-            .map_err(|e| SnmpError::EncodingError(Box::new(e)))?;
+        let scoped_pdu_bytes =
+            ber::encode(&scoped_pdu).map_err(|e| SnmpError::EncodingError(Box::new(e)))?;
         let (encrypted_pdu, privacy_parameters) = encrypt_scoped_pdu(
             &config.priv_protocol,
             &priv_key,
@@ -328,9 +328,11 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
             scoped_data: v3::ScopedPduData::EncryptedPdu(encrypted_pdu.into()),
         };
 
-        message.encode_security_parameters(rasn::Codec::Ber, &security).map_err(|e| {
-            SnmpError::EncodingError(Box::new(std::io::Error::other(e.to_string())))
-        })?;
+        message
+            .encode_security_parameters(rasn::Codec::Ber, &security)
+            .map_err(|e| {
+                SnmpError::EncodingError(Box::new(std::io::Error::other(e.to_string())))
+            })?;
 
         return finalize_v3_message_with_auth(message, &config.auth_protocol, &auth_key);
     };
@@ -379,9 +381,10 @@ fn finalize_v3_message_with_auth(
     }
 
     let usm_encoded = message.security_parameters.as_ref();
-    let auth_offset_in_usm = find_auth_placeholder_offset(usm_encoded, auth_len).ok_or_else(|| {
-        SnmpError::KeyInitFailed("failed locating auth parameters in USM blob".to_string())
-    })?;
+    let auth_offset_in_usm =
+        find_auth_placeholder_offset(usm_encoded, auth_len).ok_or_else(|| {
+            SnmpError::KeyInitFailed("failed locating auth parameters in USM blob".to_string())
+        })?;
     let usm_start = find_subsequence(&packet, usm_encoded).ok_or_else(|| {
         SnmpError::KeyInitFailed("failed locating encoded USM security parameters".to_string())
     })?;
@@ -424,7 +427,12 @@ fn derive_usm_keys(
                 "priv passphrase must be at least 8 octets (RFC 3414)".to_string(),
             ));
         }
-        derive_priv_key(*auth_protocol, *priv_protocol, priv_password.as_bytes(), engine_id)?
+        derive_priv_key(
+            *auth_protocol,
+            *priv_protocol,
+            priv_password.as_bytes(),
+            engine_id,
+        )?
     };
 
     Ok((auth_key, priv_key))
@@ -563,7 +571,9 @@ fn compute_message_auth_digest(
 ) -> Result<Vec<u8>, SnmpError> {
     match auth_protocol {
         AuthProtocol::NoAuth => Ok(Vec::new()),
-        AuthProtocol::MD5 | AuthProtocol::SHA => compute_rfc3414_digest(*auth_protocol, auth_key, packet),
+        AuthProtocol::MD5 | AuthProtocol::SHA => {
+            compute_rfc3414_digest(*auth_protocol, auth_key, packet)
+        }
         AuthProtocol::SHA224 => {
             let mut mac = <Hmac<Sha224> as Mac>::new_from_slice(auth_key)
                 .map_err(|e| SnmpError::KeyInitFailed(e.to_string()))?;
@@ -655,7 +665,11 @@ fn encrypt_scoped_pdu(
 
     match priv_protocol {
         PrivProtocol::NoPriv => Ok((scoped_pdu.to_vec(), Vec::new())),
-        PrivProtocol::AES | PrivProtocol::AES192 | PrivProtocol::AES256 | PrivProtocol::AES192C | PrivProtocol::AES256C => {
+        PrivProtocol::AES
+        | PrivProtocol::AES192
+        | PrivProtocol::AES256
+        | PrivProtocol::AES192C
+        | PrivProtocol::AES256C => {
             let privacy_parameters = salt64.to_be_bytes().to_vec();
             let mut iv = [0u8; 16];
             iv[..4].copy_from_slice(&engine_boots.to_be_bytes());
@@ -752,7 +766,10 @@ fn parse_engine_id(engine_id: &str) -> Result<Vec<u8>, SnmpError> {
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
     let trimmed = value.trim();
-    if trimmed.is_empty() || !trimmed.len().is_multiple_of(2) || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if trimmed.is_empty()
+        || !trimmed.len().is_multiple_of(2)
+        || !trimmed.bytes().all(|b| b.is_ascii_hexdigit())
+    {
         return None;
     }
 
