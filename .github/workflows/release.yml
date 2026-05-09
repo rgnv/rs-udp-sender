@@ -55,31 +55,39 @@ jobs:
   build:
     name: Build Artifacts (${{ matrix.target }})
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
             os: linux
             suffix: linux-x64
             bin_suffix: linux-x64
             artifact_name: build-linux-x64
+            use_cross: true
           - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
             os: linux
             suffix: linux-arm64
             bin_suffix: linux-arm64
             artifact_name: build-linux-arm64
+            use_cross: true
           - target: x86_64-apple-darwin
+            runner: macos-13
             os: darwin
             suffix: darwin-x64
             bin_suffix: darwin-x64
             artifact_name: build-darwin-x64
+            use_cross: false
           - target: aarch64-apple-darwin
+            runner: macos-latest
             os: darwin
             suffix: darwin-arm64
             bin_suffix: darwin-arm64
             artifact_name: build-darwin-arm64
+            use_cross: false
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -93,21 +101,33 @@ jobs:
         uses: swatinem/rust-cache@v2
 
       - name: Install cross
+        if: matrix.use_cross
         run: cargo install cross --locked
 
-      - name: Build rs-udp-sender
-        run: cross build --release --target "${{ matrix.target }}" --bin rs-udp-sender
+      - name: Build rs-udp-sender (cross)
+        if: matrix.use_cross
+        run: cross build --release --target "${{ matrix.target }}" --workspace
+
+      - name: Build rs-udp-sender (native)
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release --target "${{ matrix.target }}" --workspace
 
       - name: Create archive and checksum
         run: |
           mkdir -p dist
 
-          BINARY_SRC="target/${{ matrix.target }}/release/rs-udp-sender"
-          BINARY_NAME="rs-udp-sender-${{ matrix.bin_suffix }}"
-          cp "$BINARY_SRC" "dist/$BINARY_NAME"
+          REL_DIR="target/${{ matrix.target }}/release"
+          BINARIES="rs-udp-sender rs-udp-packet-generator rs-udp-snmp-trap-generator"
+
+          for BIN in $BINARIES; do
+            cp "$REL_DIR/$BIN" "dist/${BIN}-${{ matrix.bin_suffix }}"
+          done
 
           ARCHIVE="rs-udp-sender-${{ needs.test.outputs.version }}-${{ matrix.suffix }}.tar.gz"
-          tar -czf "dist/$ARCHIVE" -C dist "$BINARY_NAME"
+          tar -czf "dist/$ARCHIVE" -C dist \
+            "rs-udp-sender-${{ matrix.bin_suffix }}" \
+            "rs-udp-packet-generator-${{ matrix.bin_suffix }}" \
+            "rs-udp-snmp-trap-generator-${{ matrix.bin_suffix }}"
           sha256sum "dist/$ARCHIVE" > "dist/$ARCHIVE.sha256"
 
           echo "=== Built archive ==="
@@ -137,6 +157,8 @@ jobs:
             PKG_SUFFIX="arm64"
           fi
 
+          SUFFIX="${{ matrix.bin_suffix }}"
+
           # ── DEB package ───────────────────────────────────────────
           fpm -s dir -t deb \
             -n rs-udp-sender -v "$PKG_VERSION" -a "$DEB_ARCH" \
@@ -147,7 +169,9 @@ jobs:
             --after-install scripts/postinstall.sh \
             --before-remove scripts/preremove.sh \
             -p "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.deb" \
-            "dist/rs-udp-sender-${{ matrix.bin_suffix }}=/usr/bin/rs-udp-sender"
+            "dist/rs-udp-sender-${SUFFIX}=/usr/bin/rs-udp-sender" \
+            "dist/rs-udp-packet-generator-${SUFFIX}=/usr/bin/rs-udp-packet-generator" \
+            "dist/rs-udp-snmp-trap-generator-${SUFFIX}=/usr/bin/rs-udp-snmp-trap-generator"
 
           # ── RPM package ───────────────────────────────────────────
           fpm -s dir -t rpm \
@@ -159,7 +183,9 @@ jobs:
             --after-install scripts/postinstall.sh \
             --before-remove scripts/preremove.sh \
             -p "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.rpm" \
-            "dist/rs-udp-sender-${{ matrix.bin_suffix }}=/usr/bin/rs-udp-sender"
+            "dist/rs-udp-sender-${SUFFIX}=/usr/bin/rs-udp-sender" \
+            "dist/rs-udp-packet-generator-${SUFFIX}=/usr/bin/rs-udp-packet-generator" \
+            "dist/rs-udp-snmp-trap-generator-${SUFFIX}=/usr/bin/rs-udp-snmp-trap-generator"
 
           sha256sum "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.deb" > "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.deb.sha256"
           sha256sum "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.rpm" > "dist/rs-udp-sender-${PKG_VERSION}-${PKG_SUFFIX}.rpm.sha256"
