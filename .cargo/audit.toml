@@ -1,0 +1,9 @@
+[advisories]
+# git2 is pulled in only via shadow-rs, which shells out to it at build time
+# to read commit metadata for version stamping. The unsound APIs flagged by
+# these advisories (Remote::list(), BlameHunk Signature) are never exercised
+# on that path, and no git2 code ships in the release binaries' runtime path.
+ignore = [
+    "RUSTSEC-2026-0183", # git2 Remote::list() UB — build-time only via shadow-rs
+    "RUSTSEC-2026-0184", # git2 BlameHunk Signature UB — build-time only via shadow-rs
+]
