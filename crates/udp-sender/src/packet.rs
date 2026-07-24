@@ -2,13 +2,19 @@ use std::net::IpAddr;
 
 use thiserror::Error;
 
-use crate::constants::DEFAULT_MTU;
+use crate::constants::{DEFAULT_MTU, IPPROTO_UDP, IPV4_TTL, IPV6_HOP_LIMIT};
 use crate::protocol::Packet;
 
 #[derive(Debug, Error)]
 pub enum PacketError {
     #[error("packet size {size} exceeds MTU limit of {mtu} bytes")]
     MTUExceeded { mtu: usize, size: usize },
+
+    #[error("packet length {size} does not fit in a 16-bit length field")]
+    LengthOverflow { size: usize },
+
+    #[error("source and destination IP address families must match")]
+    FamilyMismatch,
 }
 
 pub struct PacketBuilder {
@@ -21,12 +27,34 @@ impl PacketBuilder {
     }
 
     pub fn build_packet(&self, pkt: &Packet) -> Result<Vec<u8>, PacketError> {
+        let mut out = Vec::new();
+        self.build_packet_into(&mut out, pkt)?;
+        Ok(out)
+    }
+
+    pub fn build_packet_into(&self, out: &mut Vec<u8>, pkt: &Packet) -> Result<(), PacketError> {
         self.validate_mtu(pkt)?;
 
+        out.clear();
         match pkt.src_ip {
-            IpAddr::V4(_) => self.build_ipv4_packet(pkt),
-            IpAddr::V6(_) => self.build_ipv6_packet(pkt),
+            IpAddr::V4(_) => {
+                out.reserve(20 + 8 + pkt.payload.len());
+                let ip_header = self.build_ipv4_header(pkt)?;
+                let udp_header = self.build_udp_header(pkt, false)?;
+                out.extend_from_slice(&ip_header);
+                out.extend_from_slice(&udp_header);
+            }
+            IpAddr::V6(_) => {
+                out.reserve(40 + 8 + pkt.payload.len());
+                let ip_header = self.build_ipv6_header(pkt)?;
+                let udp_header = self.build_udp_header(pkt, true)?;
+                out.extend_from_slice(&ip_header);
+                out.extend_from_slice(&udp_header);
+            }
         }
+        out.extend_from_slice(&pkt.payload);
+
+        Ok(())
     }
 
     fn validate_mtu(&self, pkt: &Packet) -> Result<(), PacketError> {
@@ -46,120 +74,97 @@ impl PacketBuilder {
         Ok(())
     }
 
-    fn build_ipv4_packet(&self, pkt: &Packet) -> Result<Vec<u8>, PacketError> {
-        let ip_header = self.build_ipv4_header(pkt);
-        let udp_header = self.build_udp_header(pkt, false);
+    fn build_ipv4_header(&self, pkt: &Packet) -> Result<[u8; 20], PacketError> {
+        let (IpAddr::V4(src), IpAddr::V4(dest)) = (pkt.src_ip, pkt.dest_ip) else {
+            return Err(PacketError::FamilyMismatch);
+        };
 
-        let mut packet = Vec::with_capacity(ip_header.len() + udp_header.len() + pkt.payload.len());
-        packet.extend_from_slice(&ip_header);
-        packet.extend_from_slice(&udp_header);
-        packet.extend_from_slice(&pkt.payload);
-
-        Ok(packet)
-    }
-
-    fn build_ipv6_packet(&self, pkt: &Packet) -> Result<Vec<u8>, PacketError> {
-        let ip_header = self.build_ipv6_header(pkt);
-        let udp_header = self.build_udp_header(pkt, true);
-
-        let mut packet = Vec::with_capacity(ip_header.len() + udp_header.len() + pkt.payload.len());
-        packet.extend_from_slice(&ip_header);
-        packet.extend_from_slice(&udp_header);
-        packet.extend_from_slice(&pkt.payload);
-
-        Ok(packet)
-    }
-
-    fn build_ipv4_header(&self, pkt: &Packet) -> [u8; 20] {
         let mut header = [0u8; 20];
         header[0] = 0x45;
         header[1] = 0x00;
 
-        let total_len = (20 + 8 + pkt.payload.len()) as u16;
+        let total_len =
+            u16::try_from(20 + 8 + pkt.payload.len()).map_err(|_| PacketError::LengthOverflow {
+                size: 20 + 8 + pkt.payload.len(),
+            })?;
         header[2..4].copy_from_slice(&total_len.to_be_bytes());
 
         header[4..6].copy_from_slice(&0u16.to_be_bytes());
         header[6..8].copy_from_slice(&0u16.to_be_bytes());
 
-        header[8] = 64;
-        header[9] = 17;
+        header[8] = IPV4_TTL;
+        header[9] = IPPROTO_UDP;
 
         header[10] = 0;
         header[11] = 0;
 
-        if let IpAddr::V4(src) = pkt.src_ip {
-            header[12..16].copy_from_slice(&src.octets());
-        }
-
-        if let IpAddr::V4(dest) = pkt.dest_ip {
-            header[16..20].copy_from_slice(&dest.octets());
-        }
+        header[12..16].copy_from_slice(&src.octets());
+        header[16..20].copy_from_slice(&dest.octets());
 
         let checksum = Self::calculate_checksum(&header);
         header[10..12].copy_from_slice(&checksum.to_be_bytes());
 
-        header
+        Ok(header)
     }
 
-    fn build_ipv6_header(&self, pkt: &Packet) -> [u8; 40] {
+    fn build_ipv6_header(&self, pkt: &Packet) -> Result<[u8; 40], PacketError> {
+        let (IpAddr::V6(src), IpAddr::V6(dest)) = (pkt.src_ip, pkt.dest_ip) else {
+            return Err(PacketError::FamilyMismatch);
+        };
+
         let mut header = [0u8; 40];
         header[0..4].copy_from_slice(&0x6000_0000u32.to_be_bytes());
 
-        let payload_len = (8 + pkt.payload.len()) as u16;
+        let payload_len =
+            u16::try_from(8 + pkt.payload.len()).map_err(|_| PacketError::LengthOverflow {
+                size: 8 + pkt.payload.len(),
+            })?;
         header[4..6].copy_from_slice(&payload_len.to_be_bytes());
 
-        header[6] = 17;
-        header[7] = 64;
+        header[6] = IPPROTO_UDP;
+        header[7] = IPV6_HOP_LIMIT;
 
-        if let IpAddr::V6(src) = pkt.src_ip {
-            header[8..24].copy_from_slice(&src.octets());
-        }
+        header[8..24].copy_from_slice(&src.octets());
+        header[24..40].copy_from_slice(&dest.octets());
 
-        if let IpAddr::V6(dest) = pkt.dest_ip {
-            header[24..40].copy_from_slice(&dest.octets());
-        }
-
-        header
+        Ok(header)
     }
 
-    fn build_udp_header(&self, pkt: &Packet, is_ipv6: bool) -> [u8; 8] {
+    fn build_udp_header(&self, pkt: &Packet, is_ipv6: bool) -> Result<[u8; 8], PacketError> {
         let mut header = [0u8; 8];
 
         header[0..2].copy_from_slice(&pkt.src_port.to_be_bytes());
         header[2..4].copy_from_slice(&pkt.dest_port.to_be_bytes());
 
-        let len = (8 + pkt.payload.len()) as u16;
+        let len =
+            u16::try_from(8 + pkt.payload.len()).map_err(|_| PacketError::LengthOverflow {
+                size: 8 + pkt.payload.len(),
+            })?;
         header[4..6].copy_from_slice(&len.to_be_bytes());
 
         header[6] = 0;
         header[7] = 0;
 
-        let checksum =
-            self.calculate_udp_checksum(&header, &pkt.payload, pkt.src_ip, pkt.dest_ip, is_ipv6);
+        let checksum = self.calculate_udp_checksum(
+            &header,
+            &pkt.payload,
+            pkt.src_ip,
+            pkt.dest_ip,
+            is_ipv6,
+            len,
+        );
+        // A computed checksum of 0x0000 is transmitted as 0xFFFF: zero means
+        // "no checksum" for IPv4 (RFC 768) and is illegal for IPv6 (RFC 8200 §8.1).
+        let checksum = if checksum == 0 { 0xFFFF } else { checksum };
         header[6..8].copy_from_slice(&checksum.to_be_bytes());
 
-        header
+        Ok(header)
     }
 
     fn calculate_checksum(data: &[u8]) -> u16 {
-        let mut sum: u32 = 0;
-
-        let mut i = 0;
-        while i + 1 < data.len() {
-            let word = u16::from_be_bytes([data[i], data[i + 1]]) as u32;
-            sum = sum.wrapping_add(word);
-            i += 2;
-        }
-
-        if data.len() % 2 == 1 {
-            sum = sum.wrapping_add((data[data.len() - 1] as u32) << 8);
-        }
-
-        while sum > 0xffff {
-            sum = (sum & 0xffff) + (sum >> 16);
-        }
-
-        !sum as u16
+        let mut sum = OnesComplementSum::new();
+        sum.update(data);
+        sum.finish()
     }
 
     fn calculate_udp_checksum(
@@ -169,8 +174,11 @@ impl PacketBuilder {
         src_ip: IpAddr,
         dest_ip: IpAddr,
         is_ipv6: bool,
+        udp_len: u16,
     ) -> u16 {
-        let mut pseudo_header = if is_ipv6 {
+        let mut sum = OnesComplementSum::new();
+
+        if is_ipv6 {
             let mut pseudo = [0u8; 40];
 
             if let IpAddr::V6(src) = src_ip {
@@ -180,11 +188,10 @@ impl PacketBuilder {
                 pseudo[16..32].copy_from_slice(&dest.octets());
             }
 
-            let udp_len = (udp_header.len() + payload.len()) as u32;
-            pseudo[32..36].copy_from_slice(&udp_len.to_be_bytes());
-            pseudo[39] = 17;
+            pseudo[32..36].copy_from_slice(&u32::from(udp_len).to_be_bytes());
+            pseudo[39] = IPPROTO_UDP;
 
-            pseudo.to_vec()
+            sum.update(&pseudo);
         } else {
             let mut pseudo = [0u8; 12];
 
@@ -196,18 +203,72 @@ impl PacketBuilder {
             }
 
             pseudo[8] = 0;
-            pseudo[9] = 17;
+            pseudo[9] = IPPROTO_UDP;
 
-            let udp_len = (udp_header.len() + payload.len()) as u16;
             pseudo[10..12].copy_from_slice(&udp_len.to_be_bytes());
 
-            pseudo.to_vec()
-        };
+            sum.update(&pseudo);
+        }
 
-        pseudo_header.extend_from_slice(udp_header);
-        pseudo_header.extend_from_slice(payload);
+        sum.update(udp_header);
+        sum.update(payload);
+        sum.finish()
+    }
+}
 
-        Self::calculate_checksum(&pseudo_header)
+/// Incremental RFC 1071 one's-complement sum over consecutive slices,
+/// carrying an odd trailing byte across slice boundaries.
+struct OnesComplementSum {
+    sum: u32,
+    pending_hi: Option<u8>,
+}
+
+impl OnesComplementSum {
+    fn new() -> Self {
+        Self {
+            sum: 0,
+            pending_hi: None,
+        }
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        let mut data = data;
+
+        if let Some(hi) = self.pending_hi.take() {
+            match data.split_first() {
+                Some((&lo, rest)) => {
+                    self.sum = self
+                        .sum
+                        .wrapping_add(u32::from(u16::from_be_bytes([hi, lo])));
+                    data = rest;
+                }
+                None => {
+                    self.pending_hi = Some(hi);
+                    return;
+                }
+            }
+        }
+
+        let (words, tail) = data.as_chunks::<2>();
+        for &[a, b] in words {
+            self.sum = self.sum.wrapping_add(u32::from(u16::from_be_bytes([a, b])));
+        }
+        if let Some(&hi) = tail.first() {
+            self.pending_hi = Some(hi);
+        }
+    }
+
+    fn finish(mut self) -> u16 {
+        if let Some(hi) = self.pending_hi.take() {
+            self.sum = self.sum.wrapping_add(u32::from(hi) << 8);
+        }
+
+        let mut sum = self.sum;
+        while sum > 0xffff {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+
+        !sum as u16
     }
 }
 
@@ -223,7 +284,7 @@ mod tests {
 
     use crate::protocol::Packet;
 
-    use super::{PacketBuilder, PacketError};
+    use super::{OnesComplementSum, PacketBuilder, PacketError};
 
     const IPV4_MINIMAL_HEX: &str =
         "4500002100000000401166ca0a0000010a00000230390202000d75c468656c6c6f";
@@ -416,6 +477,7 @@ mod tests {
                 assert_eq!(mtu, 1428);
                 assert_eq!(size, 1429);
             }
+            other => panic!("expected MTUExceeded, got {other:?}"),
         }
     }
 
@@ -438,6 +500,7 @@ mod tests {
                 assert_eq!(mtu, 1500);
                 assert_eq!(size, 40 + 8 + 1453);
             }
+            other => panic!("expected MTUExceeded, got {other:?}"),
         }
     }
 
@@ -503,6 +566,7 @@ mod tests {
             .expect_err("default mtu (1500) should reject 20+8+1473=1501");
         match err {
             PacketError::MTUExceeded { mtu, .. } => assert_eq!(mtu, 1500),
+            other => panic!("expected MTUExceeded, got {other:?}"),
         }
     }
 
@@ -608,5 +672,111 @@ mod tests {
         };
         let out = PacketBuilder::new(1500).build_packet(&pkt).unwrap();
         assert_eq!(out.len(), 40 + 8 + 1, "ipv6 has no header checksum field");
+    }
+
+    #[test]
+    fn mismatched_ip_families_error() {
+        let pkt = Packet {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dest_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            src_port: 1,
+            dest_port: 2,
+            payload: b"x".to_vec(),
+            flags: 0,
+        };
+        let err = PacketBuilder::new(1500)
+            .build_packet(&pkt)
+            .expect_err("v4 src / v6 dest must fail");
+        assert!(matches!(err, PacketError::FamilyMismatch));
+
+        let pkt = Packet {
+            src_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            src_port: 1,
+            dest_port: 2,
+            payload: b"x".to_vec(),
+            flags: 0,
+        };
+        let err = PacketBuilder::new(1500)
+            .build_packet(&pkt)
+            .expect_err("v6 src / v4 dest must fail");
+        assert!(matches!(err, PacketError::FamilyMismatch));
+    }
+
+    #[test]
+    fn length_overflow_error_for_oversized_payload() {
+        // MTU is user-controlled; a huge MTU must not silently truncate lengths.
+        let pkt = Packet {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 1,
+            dest_port: 2,
+            payload: vec![0u8; 70_000],
+            flags: 0,
+        };
+        let err = PacketBuilder::new(100_000)
+            .build_packet(&pkt)
+            .expect_err("payload > u16 capacity must fail");
+        assert!(matches!(err, PacketError::LengthOverflow { .. }));
+    }
+
+    #[test]
+    fn build_packet_into_matches_build_packet_and_reuses_buffer() {
+        let pkt = Packet {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 12345,
+            dest_port: 514,
+            payload: b"hello".to_vec(),
+            flags: 0,
+        };
+        let builder = PacketBuilder::new(1500);
+        let expected = builder.build_packet(&pkt).unwrap();
+
+        let mut scratch = Vec::with_capacity(1500);
+        builder.build_packet_into(&mut scratch, &pkt).unwrap();
+        assert_eq!(scratch, expected);
+
+        // Reuse clears stale content and reproduces identical bytes.
+        builder.build_packet_into(&mut scratch, &pkt).unwrap();
+        assert_eq!(scratch, expected);
+    }
+
+    #[test]
+    fn udp_total_length_overflow_is_rejected() {
+        // 8 + 65527 = 65535 fits the UDP length field, but the IPv4 total
+        // length (20 + 65535) does not fit u16 and must error, not truncate.
+        let pkt = Packet {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dest_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 1,
+            dest_port: 2,
+            payload: vec![0u8; 65527],
+            flags: 0,
+        };
+        let err = PacketBuilder::new(70_000).build_packet(&pkt);
+        assert!(matches!(err, Err(PacketError::LengthOverflow { .. })));
+    }
+
+    #[test]
+    fn incremental_sum_matches_concatenated_reference() {
+        // Odd-length first slice forces a carry across the boundary.
+        let a = [0x45u8, 0x00, 0x00];
+        let b = [0x21u8, 0x00, 0x00, 0x00, 0x40, 0x11];
+        let c = [0x66u8];
+
+        let mut inc = OnesComplementSum::new();
+        inc.update(&a);
+        inc.update(&b);
+        inc.update(&c);
+        let incremental = inc.finish();
+
+        let mut concat = Vec::new();
+        concat.extend_from_slice(&a);
+        concat.extend_from_slice(&b);
+        concat.extend_from_slice(&c);
+        let reference = PacketBuilder::calculate_checksum(&concat);
+
+        assert_eq!(incremental, reference);
     }
 }

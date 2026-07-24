@@ -153,6 +153,23 @@ Options:
   --message <string>         Message in sysDescr varbind
 ```
 
+## Operational Notes
+
+- **No v3 engine discovery**: generated v3 messages use a fixed engine ID
+  (`800000020109840301`) and `engine_boots: 0`; no RFC 3414 §4 authoritative
+  engine discovery or timeliness negotiation is performed. Receivers that
+  enforce the RFC 3414 replay/timeliness window will drop these traps —
+  acceptable for a load generator, but do not expect strict collectors to
+  accept them.
+- **DES privacy is obsolete**: DES (`CBC-DES` per RFC 3414) is retained only
+  for parity with the Go reference and legacy gear. Prefer AES-128+ in any
+  real configuration.
+- **Passphrases on the command line**: `--auth-pass` / `--priv-pass` are
+  visible in `ps` output and shell history. Use them only in test
+  environments.
+- **Key derivation is cached per run**: USM keys are derived once (the RFC
+  3414 1 MiB password hash) and reused across all traps in a run.
+
 ## Common Trap OIDs
 
 | OID | Name | Description |

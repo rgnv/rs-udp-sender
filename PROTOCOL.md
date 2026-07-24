@@ -213,6 +213,10 @@ def write_ipv4_packet(src_ip, src_port, dest_ip, dest_port, payload):
 3. complete frame reads (EOF mid-frame is error)
 4. MTU limit before handoff to send path
 
+A clean EOF at a frame boundary ends the stream silently. A truncated
+trailing frame is counted as dropped and logged as an error by the sender
+before it exits.
+
 Error classes include:
 
 - `InvalidMagic`

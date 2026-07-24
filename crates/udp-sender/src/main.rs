@@ -65,6 +65,26 @@ struct Cli {
     mtu: usize,
 }
 
+/// Rewrites Go-style single-dash long flags (`-mtu`, `-verbose`) to clap's
+/// double-dash form, matching the Go reference CLI. Single-char flags like
+/// `-m`, `-v`, `-h`, `-V` are preserved.
+fn normalize_go_style_flags(args: Vec<String>) -> Vec<String> {
+    args.into_iter()
+        .map(|arg| {
+            if arg.starts_with('-')
+                && !arg.starts_with("--")
+                && arg.len() > 2
+                && arg != "-h"
+                && arg != "-V"
+            {
+                format!("--{}", &arg[1..])
+            } else {
+                arg
+            }
+        })
+        .collect()
+}
+
 fn parse_mtu(s: &str) -> Result<usize, String> {
     let mtu = s.parse::<usize>().map_err(|e| e.to_string())?;
     if (MIN_MTU..=MAX_MTU).contains(&mtu) {
@@ -82,13 +102,13 @@ fn is_unexpected_eof(err: &ProtocolError) -> bool {
         | ProtocolError::ReadField { source, .. }
         | ProtocolError::ReadPayload { source, .. }
         | ProtocolError::ReadError(source) => source.kind() == io::ErrorKind::UnexpectedEof,
-        ProtocolError::UnexpectedEOF => true,
         _ => false,
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let raw_args: Vec<String> = std::env::args().collect();
+    let cli = Cli::try_parse_from(normalize_go_style_flags(raw_args))?;
 
     let logger = Logger::new(if cli.verbose {
         LogLevel::Debug
@@ -106,13 +126,14 @@ fn main() -> anyhow::Result<()> {
     let mut packets_sent: u64 = 0;
     let mut packets_dropped: u64 = 0;
     let mut bytes_sent: u64 = 0;
+    let mut scratch: Vec<u8> = Vec::with_capacity(cli.mtu);
 
     for item in stream {
         match item {
-            Ok(packet) => match builder.build_packet(&packet) {
-                Ok(raw_bytes) => {
+            Ok(packet) => match builder.build_packet_into(&mut scratch, &packet) {
+                Ok(()) => {
                     match sender.send(
-                        &raw_bytes,
+                        &scratch,
                         packet.dest_ip,
                         packet.dest_port,
                         packet.src_ip,
@@ -132,8 +153,20 @@ fn main() -> anyhow::Result<()> {
                 Err(PacketError::MTUExceeded { .. }) => {
                     packets_dropped += 1;
                 }
+                Err(err) => {
+                    packets_dropped += 1;
+                    let err_s = err.to_string();
+                    logger.error("Failed to build packet", &[("error", &err_s)]);
+                }
             },
-            Err(err) if is_unexpected_eof(&err) => break,
+            // Clean EOF is handled by the stream itself (it returns None);
+            // any UnexpectedEof reaching here is a truncated frame mid-packet.
+            Err(err) if is_unexpected_eof(&err) => {
+                packets_dropped += 1;
+                let err_s = err.to_string();
+                logger.error("Truncated packet at end of stream", &[("error", &err_s)]);
+                break;
+            }
             Err(ProtocolError::MTUExceeded { .. }) => {
                 packets_dropped += 1;
             }
@@ -217,11 +250,6 @@ mod tests {
     #[test]
     fn parse_mtu_rejects_empty() {
         assert!(parse_mtu("").is_err());
-    }
-
-    #[test]
-    fn is_unexpected_eof_true_for_unexpected_eof_variant() {
-        assert!(is_unexpected_eof(&ProtocolError::UnexpectedEOF));
     }
 
     #[test]
@@ -336,5 +364,36 @@ mod tests {
     #[test]
     fn cli_rejects_unknown_flag() {
         assert!(Cli::try_parse_from(["udp-sender", "--bogus"]).is_err());
+    }
+
+    #[test]
+    fn go_style_single_dash_long_flags_parse() {
+        let normalized = normalize_go_style_flags(vec![
+            "udp-sender".to_string(),
+            "-mtu".to_string(),
+            "9000".to_string(),
+            "-verbose".to_string(),
+        ]);
+        let cli = Cli::try_parse_from(normalized).unwrap();
+        assert_eq!(cli.mtu, 9000);
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn normalize_go_style_flags_preserves_short_flags() {
+        let out = normalize_go_style_flags(vec![
+            "udp-sender".to_string(),
+            "-m".to_string(),
+            "1500".to_string(),
+            "-v".to_string(),
+            "-h".to_string(),
+            "-V".to_string(),
+            "--mtu".to_string(),
+        ]);
+        assert_eq!(out[1], "-m");
+        assert_eq!(out[3], "-v");
+        assert_eq!(out[4], "-h");
+        assert_eq!(out[5], "-V");
+        assert_eq!(out[6], "--mtu");
     }
 }

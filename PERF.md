@@ -14,12 +14,12 @@ End-to-end pipeline benchmark of the Rust implementation against the canonical G
 | Generator core | `taskset -c 1` |
 | Sender core | `taskset -c 2` |
 | Warmup runs | 3 |
-| Measured runs | 5 (hyperfine 1.19.0) |
-| Profiler | `perf stat` 6.12.86, `/usr/bin/time -v` |
+| Measured runs | 5 (hyperfine 1.20.0) |
+| RSS | `/usr/bin/time -v` |
 | Drops observed | **0** (both impls) |
 | Kernel | Linux 6.17.2-1-pve |
-| rustc | 1.92 (workspace edition 2024) |
-| go | 1.24.4 |
+| rustc | 1.97.1 (workspace edition 2024) |
+| go | 1.26.4 |
 
 Pipeline:
 
@@ -31,23 +31,18 @@ Pipeline:
 
 | Metric | Rust | Go | Rust / Go |
 |---|---:|---:|---:|
-| Wall mean | **44.861 s** | 66.279 s | **0.677×** |
-| Wall stddev | 2.594 s | 2.502 s | — |
-| Wall min | 41.138 s | 62.855 s | — |
-| Wall max | 47.868 s | 68.523 s | — |
-| Throughput (pkts/s) | **222,975** | 150,876 | **1.478×** |
-| Throughput (MB/s) | **314 MB/s** | 212 MB/s | **1.478×** |
-| Max RSS | **3,156 KB** | 10,228 KB | **0.309×** |
-| Instructions (cpu_core) | **334.3 B** | 608.5 B | **0.549×** |
-| Cycles (cpu_core) | **197.9 B** | 330.3 B | **0.599×** |
-| IPC (cpu_core) | 1.69 | 1.84 | — |
-| Context switches | **1,716,704** | 3,246,077 | **0.529×** |
+| Wall mean | **64.202 s** | 109.338 s | **0.587×** |
+| Wall stddev | 2.552 s | 12.655 s | — |
+| Wall min | 61.061 s | 97.270 s | — |
+| Wall max | 67.018 s | 130.305 s | — |
+| Throughput (pkts/s) | **155,758** | 91,368 | **1.70×** |
+| Throughput (MB/s) | **219 MB/s** | 129 MB/s | **1.70×** |
+| Max RSS | **3,060 KB** | 12,996 KB | **0.235×** |
 
 ### Headline Numbers
 
-- **1.48× faster wall-clock** end-to-end (gen + parse + raw-socket send).
-- **3.24× lower RSS** (3.1 MB vs 10.2 MB peak).
-- **45% fewer instructions retired**, **40% fewer cycles**, **47% fewer context switches**.
+- **1.70× faster wall-clock** end-to-end (gen + parse + raw-socket send).
+- **4.25× lower RSS** (3.0 MB vs 13.0 MB peak).
 - **Zero drops** on both implementations at full rate.
 
 ## Reproducing
@@ -76,12 +71,12 @@ PKT_COUNT=10000000 PAYLOAD_BYTES=1400 WARMUP=3 RUNS=5 \
   scripts/perf-bench.sh
 ```
 
-Raw output: `results/{rust,go}-{hyperfine.json,perf.txt,time.txt}` and `results/summary.txt`.
+Raw output: `results/{rust,go}-{hyperfine.json,time.txt}` and `results/summary.txt`.
 
 ## Notes & Caveats
 
-- Raw-socket send is the dominant cost in both pipelines; remaining gap reflects per-packet overhead in the Go runtime (GC scan, scheduler) vs Rust's static dispatch.
-- IPC favors Go (1.84 vs 1.69) — Go retires more instructions per cycle but **must retire 1.82× as many instructions overall**, so wall and energy still favor Rust.
+- Raw-socket send (`sendto` syscall per packet) is the dominant cost in both pipelines; remaining gap reflects per-packet overhead in the Go runtime (GC scan, scheduler) vs Rust's static dispatch and zero-allocation hot path.
 - RSS gap is dominated by the Go runtime baseline (heap arenas, scheduler stacks) rather than per-packet allocation; both pipelines run with bounded per-packet allocations.
+- `perf stat` hardware counters (instructions, cycles, IPC, context-switches) were **not collectable** in this environment: `kernel.perf_event_paranoid=4` and `/proc/sys` is read-only (unprivileged container). `scripts/perf-bench.sh` still captures them automatically where perf is permitted.
+- Absolute wall-clock numbers are host-load sensitive: this run's Go stddev (12.7 s on a 109 s mean) reflects a shared/noisy host, and both implementations measured slower in absolute terms than the previous baseline on this machine. The relative comparison (same host, same window, interleaved runs) is the meaningful figure.
 - Numbers are workload-specific (1400B payload, single sender thread, localhost dummy interface). Real wire-rate gains will depend on NIC, IRQ pinning, and RX-side processing.
-

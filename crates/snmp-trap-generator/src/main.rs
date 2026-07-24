@@ -9,7 +9,7 @@ use udp_sender::constants::{
 };
 use udp_sender::snmp::{
     AuthProtocol, PrivProtocol, SNMPType, SNMPV1TrapConfig, SNMPV2cTrapConfig, SNMPV3TrapConfig,
-    SNMPValue, SNMPVarbind, build_snmpv1_trap_pdu, build_snmpv2c_trap_pdu, build_snmpv3_trap_pdu,
+    SNMPValue, SNMPVarbind, build_snmpv1_trap_pdu, build_snmpv2c_trap_pdu,
 };
 
 const DEFAULT_TRAP_OID: &str = "1.3.6.1.6.3.1.1.5.1";
@@ -171,6 +171,26 @@ fn run() -> Result<(), String> {
         return Err("SNMPv3 requires --security-name".to_string());
     }
 
+    // Hoisted out of the per-trap loop: protocol parsing is loop-invariant,
+    // and USM key derivation runs a 1 MiB password hash (RFC 3414) that must
+    // happen once per run, not once per trap.
+    let auth_protocol = parse_auth_proto(&args.auth_proto)?;
+    let priv_protocol = parse_priv_proto(&args.priv_proto)?;
+    let usm_keys = if version == SNMPVersion::V3 {
+        Some(
+            udp_sender::snmp::UsmKeys::derive(
+                &auth_protocol,
+                &args.auth_pass,
+                &priv_protocol,
+                &args.priv_pass,
+                Some(DEFAULT_SNMP_ENGINE_ID),
+            )
+            .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+
     {
         let mut stderr = io::stderr().lock();
         writeln!(
@@ -187,17 +207,28 @@ fn run() -> Result<(), String> {
         .map_err(|e| format!("failed to write status: {e}"))?;
     }
 
-    let mut stdout = io::stdout().lock();
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::with_capacity(1 << 16, stdout.lock());
+    let mut frame: Vec<u8> = Vec::with_capacity(3 + 1 + 32 + 6 + 1500);
     for i in 0..args.count {
         let src_ip = increment_ip(base_ip_addr, i);
         let src_port = args
             .base_port
             .wrapping_add(u16::try_from(i & 0xFFFF).unwrap_or(0));
-        let pdu_bytes = build_pdu(&args, version, src_ip, i)
-            .map_err(|e| format!("Error encoding SNMP trap {}: {e}", i + 1))?;
+        let pdu_bytes = build_pdu(
+            &args,
+            version,
+            src_ip,
+            i,
+            auth_protocol,
+            priv_protocol,
+            usm_keys.as_ref(),
+        )
+        .map_err(|e| format!("Error encoding SNMP trap {}: {e}", i + 1))?;
 
+        frame.clear();
         write_frame(
-            &mut stdout,
+            &mut frame,
             src_ip,
             src_port,
             dest_ip_addr,
@@ -205,7 +236,9 @@ fn run() -> Result<(), String> {
             &pdu_bytes,
             is_ipv6,
         )
-        .map_err(|e| format!("failed to write output frame: {e}"))?;
+        .map_err(|e| format!("failed to build output frame: {e}"))?;
+        out.write_all(&frame)
+            .map_err(|e| format!("failed to write output frame: {e}"))?;
 
         if (i + 1) % 100 == 0 {
             let mut stderr = io::stderr().lock();
@@ -213,6 +246,8 @@ fn run() -> Result<(), String> {
                 .map_err(|e| format!("failed to write progress: {e}"))?;
         }
     }
+    out.flush()
+        .map_err(|e| format!("failed to flush output: {e}"))?;
 
     let mut stderr = io::stderr().lock();
     writeln!(stderr, "Complete: generated {} traps", args.count)
@@ -256,6 +291,9 @@ fn build_pdu(
     version: SNMPVersion,
     src_ip: IpAddr,
     seq: usize,
+    auth_protocol: AuthProtocol,
+    priv_protocol: PrivProtocol,
+    usm_keys: Option<&udp_sender::snmp::UsmKeys>,
 ) -> Result<Vec<u8>, String> {
     let timestamp = now_unix_seconds();
     let varbinds = vec![
@@ -298,21 +336,27 @@ fn build_pdu(
             varbinds,
         })
         .map_err(|e| e.to_string()),
-        SNMPVersion::V3 => build_snmpv3_trap_pdu(SNMPV3TrapConfig {
-            username: args.security_name.clone(),
-            engine_id: Some(DEFAULT_SNMP_ENGINE_ID.to_string()),
-            auth_protocol: parse_auth_proto(&args.auth_proto)?,
-            auth_password: args.auth_pass.clone(),
-            priv_protocol: parse_priv_proto(&args.priv_proto)?,
-            priv_password: args.priv_pass.clone(),
-            engine_boots: 0,
-            engine_time: timestamp,
-            trap_oid: args.trap_oid.clone(),
-            timestamp: Some(timestamp),
-            varbinds,
-            is_inform: args.is_inform,
-        })
-        .map_err(|e| e.to_string()),
+        SNMPVersion::V3 => {
+            let keys = usm_keys.ok_or("missing pre-derived USM keys for SNMPv3")?;
+            udp_sender::snmp::build_snmpv3_trap_pdu_with_keys(
+                SNMPV3TrapConfig {
+                    username: args.security_name.clone(),
+                    engine_id: Some(DEFAULT_SNMP_ENGINE_ID.to_string()),
+                    auth_protocol,
+                    auth_password: args.auth_pass.clone(),
+                    priv_protocol,
+                    priv_password: args.priv_pass.clone(),
+                    engine_boots: 0,
+                    engine_time: timestamp,
+                    trap_oid: args.trap_oid.clone(),
+                    timestamp: Some(timestamp),
+                    varbinds,
+                    is_inform: args.is_inform,
+                },
+                keys,
+            )
+            .map_err(|e| e.to_string())
+        }
     }
 }
 

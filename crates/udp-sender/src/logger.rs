@@ -12,6 +12,12 @@ impl Logger {
         Self { min_level }
     }
 
+    /// Returns true if a message at `level` would be emitted, so callers can
+    /// skip formatting work for suppressed levels.
+    pub fn would_log(&self, level: LogLevel) -> bool {
+        level >= self.min_level
+    }
+
     pub fn log(&self, level: LogLevel, message: &str, fields: &[(&str, &str)]) {
         if level < self.min_level {
             return;

@@ -1,18 +1,18 @@
 	Command being timed: "bash -c taskset -c 1 "$PG" -count 10000000 -dest-ip 192.0.2.99 -dest-port 5000 -message "$MSG" | taskset -c 2 "$SND" -m 1500"
-	User time (seconds): 47.30
-	System time (seconds): 58.83
-	Percent of CPU this job got: 156%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:07.61
+	User time (seconds): 61.08
+	System time (seconds): 92.75
+	Percent of CPU this job got: 161%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:35.23
 	Average shared text size (kbytes): 0
 	Average unshared data size (kbytes): 0
 	Average stack size (kbytes): 0
 	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 10228
+	Maximum resident set size (kbytes): 12996
 	Average resident set size (kbytes): 0
 	Major (requiring I/O) page faults: 0
-	Minor (reclaiming a frame) page faults: 299469
-	Voluntary context switches: 3464890
-	Involuntary context switches: 324947
+	Minor (reclaiming a frame) page faults: 407173
+	Voluntary context switches: 3421337
+	Involuntary context switches: 506559
 	Swaps: 0
 	File system inputs: 0
 	File system outputs: 0

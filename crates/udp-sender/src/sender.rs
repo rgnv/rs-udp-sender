@@ -73,7 +73,17 @@ impl UDPSender {
             SockFlag::empty(),
             Some(SockProtocol::Raw),
         ) {
-            Ok(fd) => (Some(fd.into_raw_fd()), true),
+            Ok(fd) => {
+                let fd = fd.into_raw_fd();
+                if enable_ipv6_hdrincl(fd) {
+                    (Some(fd), true)
+                } else {
+                    // IPv6 header inclusion is required for source spoofing;
+                    // degrade gracefully to IPv4-only if we cannot enable it.
+                    let _ = close(fd);
+                    (None, false)
+                }
+            }
             Err(_) => (None, false),
         };
 
@@ -87,6 +97,30 @@ impl UDPSender {
     pub fn has_ipv6(&self) -> bool {
         self.has_ipv6
     }
+}
+
+/// Enable IPV6_HDRINCL so the kernel accepts our fully-formed IPv6 header
+/// instead of prepending its own. `libc::IPV6_HDRINCL` is only exposed on
+/// Linux targets; on other platforms the option is not available and we keep
+/// the socket as-is.
+#[cfg(target_os = "linux")]
+fn enable_ipv6_hdrincl(fd: RawFd) -> bool {
+    let enable_hdrincl: libc::c_int = 1;
+    let setopt_result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IPV6,
+            libc::IPV6_HDRINCL,
+            (&enable_hdrincl as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    setopt_result == 0
+}
+
+#[cfg(not(target_os = "linux"))]
+fn enable_ipv6_hdrincl(_fd: RawFd) -> bool {
+    true
 }
 
 impl PacketSender for UDPSender {

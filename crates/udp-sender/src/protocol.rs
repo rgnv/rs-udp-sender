@@ -4,7 +4,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 
 use crate::constants::{
-    FLAG_IPV6, IPV4_HEADER_SIZE, IPV6_HEADER_SIZE, MAGIC_BYTES, PROGRESS_INTERVAL, UDP_HEADER_SIZE,
+    FLAG_IPV6, IPV4_HEADER_SIZE, IPV6_HEADER_SIZE, LogLevel, MAGIC_BYTES, PROGRESS_INTERVAL,
+    UDP_HEADER_SIZE,
 };
 use crate::logger::Logger;
 
@@ -20,9 +21,6 @@ pub struct Packet {
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
-    #[error("unexpected EOF at stream end")]
-    UnexpectedEOF,
-
     #[error(
         "invalid magic number: got [0x{got0:02X} 0x{got1:02X} 0x{got2:02X}], expected [0x{exp0:02X} 0x{exp1:02X} 0x{exp2:02X}] - stream may be misaligned"
     )]
@@ -88,7 +86,7 @@ enum MagicRead {
 impl<'a, R: Read> ProtocolStream<'a, R> {
     pub fn new(reader: R, has_ipv6: bool, mtu: usize, logger: &'a Logger) -> Self {
         Self {
-            reader: BufReader::new(reader),
+            reader: BufReader::with_capacity(64 * 1024, reader),
             has_ipv6,
             mtu,
             logger,
@@ -97,21 +95,6 @@ impl<'a, R: Read> ProtocolStream<'a, R> {
             bytes_sent: 0,
             terminated: false,
         }
-    }
-
-    fn log_stream_complete(&self) {
-        let packets_sent = self.packets_sent.to_string();
-        let packets_dropped = self.packets_dropped.to_string();
-        let bytes_sent = self.bytes_sent.to_string();
-
-        self.logger.info(
-            "Stream complete",
-            &[
-                ("packets_sent", &packets_sent),
-                ("packets_dropped", &packets_dropped),
-                ("bytes_sent", &bytes_sent),
-            ],
-        );
     }
 
     fn read_magic(&mut self) -> Result<MagicRead, ProtocolError> {
@@ -180,7 +163,6 @@ impl<'a, R: Read> Iterator for ProtocolStream<'a, R> {
 
         let magic = match self.read_magic() {
             Ok(MagicRead::EndOfStream) => {
-                self.log_stream_complete();
                 self.terminated = true;
                 return None;
             }
@@ -319,7 +301,9 @@ impl<'a, R: Read> Iterator for ProtocolStream<'a, R> {
         self.packets_sent += 1;
         self.bytes_sent += payload.len() as u64;
 
-        if (self.packets_sent as usize).is_multiple_of(PROGRESS_INTERVAL) {
+        if (self.packets_sent as usize).is_multiple_of(PROGRESS_INTERVAL)
+            && self.logger.would_log(LogLevel::Debug)
+        {
             let packets_sent = self.packets_sent.to_string();
             let bytes_sent = self.bytes_sent.to_string();
 

@@ -10,17 +10,13 @@ pub const IPV4_HEADER_SIZE: usize = 20;
 pub const IPV6_HEADER_SIZE: usize = 40;
 pub const UDP_HEADER_SIZE: usize = 8;
 
-pub const IP_VERSION_4: u8 = 4;
-pub const IP_VERSION_6: u8 = 6;
-
-pub const IPPROTO_UDP: i32 = 17;
+pub const IPPROTO_UDP: u8 = 17;
 
 pub const IPV4_TTL: u8 = 64;
-pub const IPV6_HOP_LIMIT: u32 = 64;
+pub const IPV6_HOP_LIMIT: u8 = 64;
 
 pub const PROGRESS_INTERVAL: usize = 100;
 
-pub const SNMP_TRAP_OID: &str = "1.3.6.1.6.3.1.1.4.1";
 pub const SNMP_SYS_UP_TIME_OID: &str = "1.3.6.1.2.1.1.3.0";
 pub const SNMP_SYS_DESCR_OID: &str = "1.3.6.1.2.1.1.1.0";
 pub const SNMP_SYS_NAME_OID: &str = "1.3.6.1.2.1.1.5.0";

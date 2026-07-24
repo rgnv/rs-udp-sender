@@ -32,7 +32,7 @@ jobs:
         uses: swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --workspace --exclude rs-udp-sender --exclude rs-udp-sender-integration
+        run: cargo test --workspace
 
       - name: Extract version info
         id: version

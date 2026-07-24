@@ -77,7 +77,8 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let cli = Cli::parse();
+    let raw_args: Vec<String> = std::env::args().collect();
+    let cli = Cli::try_parse_from(normalize_go_style_flags(raw_args)).map_err(|e| e.to_string())?;
     if cli.help {
         print!("{HELP_TEXT}");
         io::stdout().flush().map_err(|e| e.to_string())?;
@@ -116,26 +117,34 @@ fn generate_ipv4(cli: &Cli) -> Result<(), String> {
     };
 
     let base_octets = base_v4.octets();
-    let base_last = u16::from(base_octets[3]);
-    let mut stdout = io::stdout();
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::with_capacity(1 << 16, stdout.lock());
+    let mut frame: Vec<u8> = Vec::with_capacity(3 + 1 + 8 + 6 + 256);
+    let mut payload = String::with_capacity(cli.message.len() + 20);
 
     for i in 0..cli.count {
         let mut src = base_octets;
-        src[3] = ((base_last + (i as u16)) % 256) as u8;
+        src[3] = src[3].wrapping_add(i as u8);
         let src_port = cli.base_port.wrapping_add(i as u16);
-        let payload = format!("{} {}", cli.message, i).into_bytes();
 
+        payload.clear();
+        use std::fmt::Write as _;
+        write!(payload, "{} {}", cli.message, i).map_err(|e| e.to_string())?;
+
+        frame.clear();
         write_packet(
-            &mut stdout,
+            &mut frame,
             0,
             &src,
             &dest_v4.octets(),
             src_port,
             cli.dest_port,
-            &payload,
+            payload.as_bytes(),
         )?;
+        out.write_all(&frame).map_err(|e| e.to_string())?;
     }
 
+    out.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -164,32 +173,60 @@ fn generate_ipv6(cli: &Cli) -> Result<(), String> {
     };
 
     let base_octets = base_v6.octets();
-    let base_last = u16::from(base_octets[15]);
-    let mut stdout = io::stdout();
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::with_capacity(1 << 16, stdout.lock());
+    let mut frame: Vec<u8> = Vec::with_capacity(3 + 1 + 32 + 6 + 256);
+    let mut payload = String::with_capacity(cli.message.len() + 20);
 
     for i in 0..cli.count {
         let mut src = base_octets;
-        src[15] = ((base_last + (i as u16)) % 256) as u8;
+        src[15] = src[15].wrapping_add(i as u8);
         let src_port = cli.base_port.wrapping_add(i as u16);
-        let payload = format!("{} {}", cli.message, i).into_bytes();
 
+        payload.clear();
+        use std::fmt::Write as _;
+        write!(payload, "{} {}", cli.message, i).map_err(|e| e.to_string())?;
+
+        frame.clear();
         write_packet(
-            &mut stdout,
+            &mut frame,
             FLAG_IPV6,
             &src,
             &dest_v6.octets(),
             src_port,
             cli.dest_port,
-            &payload,
+            payload.as_bytes(),
         )?;
+        out.write_all(&frame).map_err(|e| e.to_string())?;
     }
 
+    out.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 fn parse_ip(raw: &str) -> Result<IpAddr, String> {
     raw.parse::<IpAddr>()
         .map_err(|_| format!("Invalid IP address: {raw}"))
+}
+
+/// Rewrites Go-style single-dash long flags (`-count`) to clap's double-dash
+/// form (`--count`), matching the snmp-trap-generator behavior and the Go
+/// reference. Single-char flags like `-h` are preserved.
+fn normalize_go_style_flags(args: Vec<String>) -> Vec<String> {
+    args.into_iter()
+        .map(|arg| {
+            if arg.starts_with('-')
+                && !arg.starts_with("--")
+                && arg.len() > 2
+                && arg != "-h"
+                && arg != "-V"
+            {
+                format!("--{}", &arg[1..])
+            } else {
+                arg
+            }
+        })
+        .collect()
 }
 
 fn write_packet<W: Write>(
@@ -334,8 +371,36 @@ mod tests {
         assert_eq!(&out[18..20], b"hi");
     }
 
-    // Verifies the full IPv6 frame byte layout: src/dest are 16 bytes each.
     #[test]
+    fn go_style_single_dash_long_flags_parse() {
+        let normalized = normalize_go_style_flags(vec![
+            "packet-generator".to_string(),
+            "-count".to_string(),
+            "3".to_string(),
+            "-base-ip".to_string(),
+            "10.0.0.1".to_string(),
+            "-ipv6".to_string(),
+        ]);
+        let cli = Cli::try_parse_from(normalized).unwrap();
+        assert_eq!(cli.count, 3);
+        assert_eq!(cli.base_ip, "10.0.0.1");
+        assert!(cli.ipv6);
+    }
+
+    #[test]
+    fn normalize_go_style_flags_preserves_short_flags() {
+        let out = normalize_go_style_flags(vec![
+            "packet-generator".to_string(),
+            "-h".to_string(),
+            "-V".to_string(),
+            "--count".to_string(),
+        ]);
+        assert_eq!(out[1], "-h");
+        assert_eq!(out[2], "-V");
+        assert_eq!(out[3], "--count");
+    }
+
+    // Verifies the full IPv6 frame byte layout: src/dest are 16 bytes each.    #[test]
     fn full_ipv6_frame_layout_is_exact() {
         let mut out = Vec::new();
         let src = "2001:db8::1".parse::<Ipv6Addr>().unwrap();

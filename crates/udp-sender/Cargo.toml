@@ -16,13 +16,9 @@ path = "src/lib.rs"
 [dependencies]
 shadow-rs.workspace = true
 clap = { version = "4.6", features = ["derive"] }
-nix = { version = "0.30", features = ["socket", "ioctl"] }
-socket2 = { version = "0.6", features = ["all"] }
-bytes = "1.10"
+nix = { version = "0.31", features = ["socket", "ioctl"] }
 thiserror = "2.0"
 anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 rasn = "0.28"
 rasn-snmp = "0.28"
 rasn-smi = "0.28"
@@ -35,7 +31,7 @@ des = "0.8"
 cfb-mode = "0.8"
 cipher = "0.4"
 cbc = "0.1"
-getrandom = "0.2"
+getrandom = "0.4"
 
 [build-dependencies]
 shadow-rs.workspace = true

@@ -7,7 +7,6 @@ use aes::{Aes128, Aes192, Aes256};
 use cbc::cipher::block_padding::NoPadding;
 use cbc::cipher::{AsyncStreamCipher, BlockEncryptMut, KeyIvInit};
 use des::Des;
-use getrandom::getrandom;
 use hmac::{Hmac, Mac};
 use md5::Md5;
 use rasn::ber;
@@ -207,6 +206,54 @@ pub fn build_snmpv2c_trap_pdu(config: SNMPV2cTrapConfig) -> Result<Vec<u8>, Snmp
 }
 
 pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpError> {
+    let keys = UsmKeys::derive(
+        &config.auth_protocol,
+        &config.auth_password,
+        &config.priv_protocol,
+        &config.priv_password,
+        config.engine_id.as_deref(),
+    )?;
+    build_snmpv3_trap_pdu_with_keys(config, &keys)
+}
+
+/// Localized USM keys for one (auth protocol, priv protocol, engine ID)
+/// triple. Derivation runs the RFC 3414 1 MiB password hash, so when
+/// generating many traps with the same credentials, derive once here and
+/// reuse via [`build_snmpv3_trap_pdu_with_keys`].
+#[derive(Debug, Clone)]
+pub struct UsmKeys {
+    auth_key: Vec<u8>,
+    priv_key: Vec<u8>,
+}
+
+impl UsmKeys {
+    pub fn derive(
+        auth_protocol: &AuthProtocol,
+        auth_password: &str,
+        priv_protocol: &PrivProtocol,
+        priv_password: &str,
+        engine_id: Option<&str>,
+    ) -> Result<Self, SnmpError> {
+        let engine_id_bytes = parse_engine_id(
+            engine_id
+                .filter(|v| !v.is_empty())
+                .unwrap_or(DEFAULT_SNMP_ENGINE_ID),
+        )?;
+        let (auth_key, priv_key) = derive_usm_keys(
+            auth_protocol,
+            auth_password,
+            priv_protocol,
+            priv_password,
+            &engine_id_bytes,
+        )?;
+        Ok(Self { auth_key, priv_key })
+    }
+}
+
+pub fn build_snmpv3_trap_pdu_with_keys(
+    config: SNMPV3TrapConfig,
+    keys: &UsmKeys,
+) -> Result<Vec<u8>, SnmpError> {
     if config.trap_oid.trim().is_empty() {
         return Err(SnmpError::MissingField("trap_oid".to_string()));
     }
@@ -237,13 +284,8 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
         ));
     }
 
-    let (auth_key, priv_key) = derive_usm_keys(
-        &config.auth_protocol,
-        &config.auth_password,
-        &config.priv_protocol,
-        &config.priv_password,
-        &engine_id_bytes,
-    )?;
+    let auth_key = &keys.auth_key;
+    let priv_key = &keys.priv_key;
 
     let mut variable_bindings = Vec::with_capacity(config.varbinds.len() + 2);
     variable_bindings.push(v2::VarBind {
@@ -292,7 +334,7 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
     let flags = base_flags | if config.is_inform { 0x04 } else { 0x00 };
 
     let auth_placeholder_len = auth_parameter_len(&config.auth_protocol);
-    let mut auth_placeholder = vec![0u8; auth_placeholder_len];
+    let auth_placeholder = vec![0u8; auth_placeholder_len];
 
     let scoped_data = if config.priv_protocol == PrivProtocol::NoPriv {
         v3::ScopedPduData::CleartextPdu(scoped_pdu)
@@ -301,12 +343,11 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
             ber::encode(&scoped_pdu).map_err(|e| SnmpError::EncodingError(Box::new(e)))?;
         let (encrypted_pdu, privacy_parameters) = encrypt_scoped_pdu(
             &config.priv_protocol,
-            &priv_key,
+            priv_key,
             config.engine_boots,
             config.engine_time,
             &scoped_pdu_bytes,
         )?;
-        auth_placeholder = vec![0u8; auth_placeholder_len];
         let security = v3::USMSecurityParameters {
             authoritative_engine_id: engine_id_bytes.clone().into(),
             authoritative_engine_boots: config.engine_boots.into(),
@@ -334,7 +375,7 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
                 SnmpError::EncodingError(Box::new(std::io::Error::other(e.to_string())))
             })?;
 
-        return finalize_v3_message_with_auth(message, &config.auth_protocol, &auth_key);
+        return finalize_v3_message_with_auth(message, &config.auth_protocol, auth_key);
     };
 
     let security = v3::USMSecurityParameters {
@@ -362,7 +403,7 @@ pub fn build_snmpv3_trap_pdu(config: SNMPV3TrapConfig) -> Result<Vec<u8>, SnmpEr
         .encode_security_parameters(rasn::Codec::Ber, &security)
         .map_err(|e| SnmpError::EncodingError(Box::new(std::io::Error::other(e.to_string()))))?;
 
-    finalize_v3_message_with_auth(message, &config.auth_protocol, &auth_key)
+    finalize_v3_message_with_auth(message, &config.auth_protocol, auth_key)
 }
 
 fn finalize_v3_message_with_auth(
@@ -381,8 +422,8 @@ fn finalize_v3_message_with_auth(
     }
 
     let usm_encoded = message.security_parameters.as_ref();
-    let auth_offset_in_usm =
-        find_auth_placeholder_offset(usm_encoded, auth_len).ok_or_else(|| {
+    let auth_value_offset =
+        find_auth_params_value_offset(usm_encoded, auth_len).ok_or_else(|| {
             SnmpError::KeyInitFailed("failed locating auth parameters in USM blob".to_string())
         })?;
     let usm_start = find_subsequence(&packet, usm_encoded).ok_or_else(|| {
@@ -396,7 +437,7 @@ fn finalize_v3_message_with_auth(
         ));
     }
 
-    let auth_start = usm_start + auth_offset_in_usm + 2;
+    let auth_start = usm_start + auth_value_offset;
     packet[auth_start..auth_start + auth_len].copy_from_slice(&digest[..auth_len]);
     Ok(packet)
 }
@@ -657,9 +698,11 @@ fn encrypt_scoped_pdu(
 ) -> Result<(Vec<u8>, Vec<u8>), SnmpError> {
     static SALT_COUNTER: OnceLock<AtomicU64> = OnceLock::new();
     let counter = SALT_COUNTER.get_or_init(|| {
-        let mut seed = [0u8; 8];
-        let _ = getrandom(&mut seed);
-        AtomicU64::new(u64::from_be_bytes(seed))
+        // A failed RNG must never silently seed the salt counter: two runs
+        // with the same key/boots/time would reuse AES-CFB IVs (keystream
+        // reuse), so fail fast instead.
+        let seed = getrandom::u64().expect("getrandom failed: cannot seed SNMPv3 salt counter");
+        AtomicU64::new(seed)
     });
     let salt64 = counter.fetch_add(1, Ordering::Relaxed);
 
@@ -731,15 +774,65 @@ fn encrypt_scoped_pdu(
     }
 }
 
-fn find_auth_placeholder_offset(usm_bytes: &[u8], auth_len: usize) -> Option<usize> {
+/// Locates msgAuthenticationParameters structurally inside the BER-encoded
+/// USMSecurityParameters SEQUENCE. The USM blob is a SEQUENCE of six TLVs in
+/// fixed order (engineID, boots, time, userName, authParams, privParams), so
+/// walking the TLVs is robust against user-controlled engine IDs / user names
+/// that happen to contain the auth placeholder byte pattern. Returns the
+/// offset of the auth parameters *value* within `usm_bytes`.
+fn find_auth_params_value_offset(usm_bytes: &[u8], auth_len: usize) -> Option<usize> {
     if auth_len == 0 {
         return None;
     }
-    let mut needle = Vec::with_capacity(auth_len + 2);
-    needle.push(0x04);
-    needle.push(auth_len as u8);
-    needle.extend(std::iter::repeat_n(0u8, auth_len));
-    find_subsequence(usm_bytes, &needle)
+
+    let (mut pos, seq_end) = read_tlv(usm_bytes, 0)?;
+    if usm_bytes[0] != 0x30 || seq_end > usm_bytes.len() {
+        return None; // not a well-formed definite-length SEQUENCE
+    }
+
+    // Walk to the 5th TLV (index 4): msgAuthenticationParameters.
+    for index in 0..=4usize {
+        if pos >= seq_end {
+            return None;
+        }
+        let tag = *usm_bytes.get(pos)?;
+        let (content_start, content_end) = read_tlv(usm_bytes, pos)?;
+        if content_end > seq_end {
+            return None;
+        }
+        if index == 4 {
+            if tag != 0x04 || content_end - content_start != auth_len {
+                return None; // not the expected OCTET STRING placeholder
+            }
+            return Some(content_start);
+        }
+        pos = content_end;
+    }
+    None
+}
+
+/// Parses the BER TLV header at `offset`, returning (content_start,
+/// content_end). Handles short- and long-form definite lengths.
+fn read_tlv(buf: &[u8], offset: usize) -> Option<(usize, usize)> {
+    let first_len = *buf.get(offset + 1)?;
+    let (content_start, content_len) = if first_len & 0x80 == 0 {
+        (offset + 2, usize::from(first_len))
+    } else {
+        let len_octets = usize::from(first_len & 0x7F);
+        if len_octets == 0 || len_octets > size_of::<usize>() {
+            return None; // indefinite form / absurd length-of-length
+        }
+        let mut value = 0usize;
+        for i in 0..len_octets {
+            value = (value << 8) | usize::from(*buf.get(offset + 2 + i)?);
+        }
+        (offset + 2 + len_octets, value)
+    };
+    let content_end = content_start.checked_add(content_len)?;
+    if content_end > buf.len() {
+        return None;
+    }
+    Some((content_start, content_end))
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {

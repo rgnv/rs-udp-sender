@@ -174,14 +174,11 @@ End-to-end pipeline benchmark (generator + parser + raw-socket sender) against t
 
 | Metric | Rust | Go | Rust / Go |
 |---|---:|---:|---:|
-| Wall mean | **44.86 s** | 66.28 s | **0.677×** |
-| Throughput | **222,975 pkts/s** (314 MB/s) | 150,876 pkts/s (212 MB/s) | **1.478×** |
-| Max RSS | **3,156 KB** | 10,228 KB | **0.309×** |
-| Instructions retired | **334.3 B** | 608.5 B | **0.549×** |
-| Cycles | **197.9 B** | 330.3 B | **0.599×** |
-| Context switches | **1,716,704** | 3,246,077 | **0.529×** |
+| Wall mean | **64.20 s** | 109.34 s | **0.587×** |
+| Throughput | **155,758 pkts/s** (219 MB/s) | 91,368 pkts/s (129 MB/s) | **1.70×** |
+| Max RSS | **3,060 KB** | 12,996 KB | **0.235×** |
 
-**1.48× faster wall-clock**, **3.24× lower RSS**, **45% fewer instructions retired**. See [PERF.md](./PERF.md) for the full setup, profiler output, and reproduction steps.
+**1.70× faster wall-clock**, **4.25× lower RSS**. See [PERF.md](./PERF.md) for the full setup and reproduction steps.
 
 ## Protocol and Design Docs
 

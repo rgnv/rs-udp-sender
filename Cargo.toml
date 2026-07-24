@@ -7,10 +7,15 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 
 [workspace.dependencies]
-shadow-rs = "0.38"
+shadow-rs = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
