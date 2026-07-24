@@ -108,7 +108,13 @@ fn is_unexpected_eof(err: &ProtocolError) -> bool {
 
 fn main() -> anyhow::Result<()> {
     let raw_args: Vec<String> = std::env::args().collect();
-    let cli = Cli::try_parse_from(normalize_go_style_flags(raw_args))?;
+    // try_parse_from returns Err for -h/-V (DisplayHelp/DisplayVersion);
+    // Error::exit reproduces Cli::parse() behavior: print to stdout and
+    // exit 0 for those, print usage to stderr and exit 2 for real errors.
+    let cli = match Cli::try_parse_from(normalize_go_style_flags(raw_args)) {
+        Ok(cli) => cli,
+        Err(err) => err.exit(),
+    };
 
     let logger = Logger::new(if cli.verbose {
         LogLevel::Debug
@@ -395,5 +401,25 @@ mod tests {
         assert_eq!(out[4], "-h");
         assert_eq!(out[5], "-V");
         assert_eq!(out[6], "--mtu");
+    }
+
+    #[test]
+    fn cli_version_flag_requests_display_version() {
+        let err = Cli::try_parse_from(["udp-sender", "-V"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn cli_help_flag_requests_display_help() {
+        let err = Cli::try_parse_from(["udp-sender", "-h"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn go_style_version_flag_requests_display_version() {
+        let normalized =
+            normalize_go_style_flags(vec!["udp-sender".to_string(), "-version".to_string()]);
+        let err = Cli::try_parse_from(normalized).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
     }
 }
